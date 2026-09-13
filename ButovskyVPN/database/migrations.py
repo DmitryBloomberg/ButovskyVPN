@@ -1277,6 +1277,11 @@ _BASELINE_PAGES_V97 = (('access_blocked',
   '⚡️ Поддержка 24/7\n'
   '🔒 Полная анонимность и отсутствие логов\n'
   '\n'
+  'Покупая или активируя пробную подписку предоставляющих доступ к нашим услугам вы автоматически соглашаетесь с условия ссылки на прочтени представлены ниже:\n'
+  '\n'
+  'Политика конфиденциальности - https://telegra.ph/Politika-konfidencialnosti-ButovskyVPN-09-13\n'
+  'Пользовательское соглашение - https://telegra.ph/POLZOVATELSKOE-SOGLASHENIE-I-LICENZIYA-EULA-09-13\n'
+  '\n'
   '📋 <b>Тарифы:</b>\n'
   '%tariffs%',
   '[{"id": "btn_my_keys", "label": "🔑 Мои ключи", "color": "secondary", "row": 0, "col": 0, '

@@ -72,17 +72,25 @@
 
 ## 2. 🛠️ Установка и запуск
 
-Подключитесь к серверу Ubuntu 24 по SSH и выполните одну команду:
+Подключитесь к серверу Ubuntu 24 по SSH и выполните:
 ```bash
-bash <(curl -sL https://raw.githubusercontent.com/DmitryBloomberg/ButovskyVPN/main/install.sh)
+git clone https://github.com/DmitryBloomberg/ButovskyVPN.git
+cd ButovskyVPN
+bash start.sh
 ```
 
-Выберите **1) 🚀 Установка**, введите токен бота и ваш Telegram ID — скрипт сделает всё автоматически:
-- обновит системные пакеты
-- скачает репозиторий с GitHub
-- создаст виртуальное окружение и установит зависимости Python
-- настроит автозапуск бота и зарегистрирует служебный шаблон обновления в systemd
-- запустит бота
+Введите токен бота и ваш Telegram ID — `start.sh` сделает всё автоматически:
+- создаст виртуальное окружение и установит зависимости Python;
+- сохранит настройки бота в `config.py`;
+- создаст systemd-сервис `butovsky-vpn.service`;
+- включит запуск после перезагрузки сервера;
+- запустит бота в фоне и будет автоматически перезапускать его при сбое.
+
+Проверить состояние можно командами:
+```bash
+systemctl status butovsky-vpn.service
+journalctl -u butovsky-vpn.service -f
+```
 
 Для обновления бота запустите скрипт повторно и выберите:
 
