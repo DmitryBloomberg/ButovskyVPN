@@ -1,0 +1,55 @@
+"""
+Connecting admin panel routers.
+"""
+from aiogram import Router
+
+from bot.handlers.admin.main import router as main_router
+from bot.handlers.admin.message_editor import router as message_editor_router
+from bot.handlers.admin.servers import router as servers_router
+from bot.handlers.admin.payments import router as payments_router
+from bot.handlers.admin.cryptobot import router as cryptobot_router
+from bot.handlers.admin.tariffs import router as tariffs_router
+from bot.handlers.admin.broadcast import router as broadcast_router
+from bot.handlers.admin.broadcast_editor import router as broadcast_editor_router
+from bot.handlers.admin.users_list import router as users_list_router
+from bot.handlers.admin.users_manage import router as users_manage_router
+from bot.handlers.admin.users_keys import router as users_keys_router
+from bot.handlers.admin.key_plans import router as key_plans_router
+from bot.handlers.admin.users_keys_deleted import router as users_keys_deleted_router
+from bot.handlers.admin.system import router as system_router
+from bot.handlers.admin.trial import router as trial_router
+from bot.handlers.admin.referral import router as referral_router
+from bot.handlers.admin.promotions import router as promotions_router
+from bot.handlers.admin.coupons import router as coupons_router
+from bot.handlers.admin.coupon_generator import router as coupon_generator_router
+from bot.handlers.admin.groups import router as groups_router
+from bot.handlers.admin.butovsky_admin import router as butovsky_admin_router
+from bot.handlers.admin.support import router as support_router
+from bot.handlers.admin.customization_reset import router as customization_reset_router
+
+admin_router = Router()
+
+admin_router.include_router(main_router)
+admin_router.include_router(message_editor_router)
+admin_router.include_router(servers_router)
+admin_router.include_router(payments_router)
+admin_router.include_router(cryptobot_router)
+admin_router.include_router(tariffs_router)
+admin_router.include_router(groups_router)
+admin_router.include_router(broadcast_router)
+admin_router.include_router(broadcast_editor_router)
+admin_router.include_router(users_list_router)
+admin_router.include_router(users_manage_router)
+admin_router.include_router(support_router)
+admin_router.include_router(key_plans_router)
+admin_router.include_router(users_keys_router)
+admin_router.include_router(users_keys_deleted_router)
+admin_router.include_router(system_router)
+admin_router.include_router(trial_router)
+admin_router.include_router(referral_router)
+admin_router.include_router(promotions_router)
+admin_router.include_router(coupons_router)
+admin_router.include_router(coupon_generator_router)
+admin_router.include_router(butovsky_admin_router)
+admin_router.include_router(customization_reset_router)
+

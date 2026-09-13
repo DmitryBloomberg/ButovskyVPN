@@ -1,0 +1,1427 @@
+"""
+Module for automatic tasks.
+
+Includes:
+- Sending daily statistics to administrators
+- Creating and sending an archive with backups (bot database + VPN panels + custom extensions)
+- Synchronization of traffic with VPN servers (every 5 minutes)
+- Notifications about ending traffic
+"""
+
+import asyncio
+import logging
+import os
+import shutil
+import tempfile
+import zipfile
+from dataclasses import dataclass
+from datetime import datetime, time as dt_time, timedelta
+from io import BytesIO
+from typing import Any, Dict, List, Optional, Sequence
+
+from aiogram import Bot
+from aiogram.types import BufferedInputFile, ReplyKeyboardRemove
+
+from config import ADMIN_IDS, GITHUB_REPO_URL
+from database.requests import (
+    get_all_servers, get_users_stats, get_keys_stats,
+    get_daily_payments_stats, get_new_users_count_today,
+    get_setting, get_expiring_keys, is_notification_sent_today, log_notification_sent,
+    is_update_notifications_enabled, mark_user_bot_blocked
+)
+from database.db_backup import backup_bot_database_to
+from bot.services.vpn_api import (
+    get_client_from_server_data,
+    VPNAPIError,
+    format_traffic,
+)
+from bot.services.panels.base import PanelDatabaseBackup
+from bot.services.panel_sync import (
+    SnapshotCollection,
+    collect_changed_traffic_updates,
+    collect_server_snapshots,
+    run_db_to_panel_sync,
+)
+from bot.services.panel_sync_coordinator import panel_sync_coordinator
+from bot.services.update_rollback import cleanup_pre_update_snapshots
+from bot.utils.git_utils import check_for_updates
+from bot.utils.update_block import is_update_blocked, get_blocked_message, try_unblock
+from bot.utils.delivery import is_bot_blocked_error
+from bot.utils.text import escape_html
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+logger = logging.getLogger(__name__)
+
+# Path to the bot database
+BOT_DB_PATH = os.path.join(os.path.dirname(__file__), '..', '..', 'database', 'vpn_bot.db')
+
+# Project root folder and local backup folder
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+BACKUP_DIR = os.path.join(PROJECT_ROOT, 'backup')
+CUSTOM_EXTENSIONS_DIR = os.path.join(PROJECT_ROOT, 'custom_extensions')
+CUSTOM_EXTENSIONS_BACKUP_DIRNAME = 'custom_extensions'
+
+# How many days to store local backups
+BACKUP_RETENTION_DAYS = 7
+
+_CUSTOM_EXTENSION_CACHE_DIRS = {'__pycache__'}
+_CUSTOM_EXTENSION_CACHE_SUFFIXES = ('.pyc', '.pyo')
+
+
+@dataclass(frozen=True)
+class CollectedPanelBackup:
+    """Backup of one VPN panel, downloaded once per daily cycle."""
+
+    server_name: str
+    filename: str
+    backup: PanelDatabaseBackup
+
+
+@dataclass(frozen=True)
+class PanelBackupWarning:
+    """Error downloading backup of a specific VPN panel."""
+
+    server_name: str
+    message: str
+
+
+@dataclass(frozen=True)
+class PanelBackupCollection:
+    """The result of collecting backups of active VPN panels."""
+
+    backups: tuple[CollectedPanelBackup, ...]
+    warnings: tuple[PanelBackupWarning, ...]
+
+
+def _safe_panel_backup_filename(server_name: str, extension: str) -> str:
+    """Forms the name of the panel backup file according to the actual database format."""
+    safe_name = str(server_name or "server").replace(" ", "_")
+    safe_name = "".join("_" if ch in '<>:"/\\|?*' else ch for ch in safe_name).strip(" .")
+    if not safe_name:
+        safe_name = "server"
+    safe_extension = extension if extension.startswith(".") else f".{extension}"
+    return f"server_{safe_name}_x-ui{safe_extension}"
+
+
+def _short_panel_warning(message: str, limit: int = 140) -> str:
+    """Limits the error text for Telegram caption."""
+    text = " ".join(str(message or "").split())
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit - 3]}..."
+
+
+def _collect_custom_extension_files() -> Optional[list[tuple[str, str]]]:
+    """Returns safe regular files from custom_extensions and their relative paths."""
+    source_root = os.path.abspath(CUSTOM_EXTENSIONS_DIR)
+    if not os.path.lexists(source_root):
+        return None
+    if os.path.islink(source_root) or not os.path.isdir(source_root):
+        logger.warning(
+            "Бэкап custom_extensions пропущен: путь не является обычным каталогом: %s",
+            source_root,
+        )
+        return None
+
+    files: list[tuple[str, str]] = []
+    for current_root, dirnames, filenames in os.walk(
+        source_root,
+        topdown=True,
+        followlinks=False,
+    ):
+        safe_dirnames = []
+        for dirname in sorted(dirnames):
+            directory_path = os.path.join(current_root, dirname)
+            if dirname in _CUSTOM_EXTENSION_CACHE_DIRS or os.path.islink(directory_path):
+                continue
+            safe_dirnames.append(dirname)
+        dirnames[:] = safe_dirnames
+
+        for filename in sorted(filenames):
+            if filename.casefold().endswith(_CUSTOM_EXTENSION_CACHE_SUFFIXES):
+                continue
+            source_path = os.path.join(current_root, filename)
+            if os.path.islink(source_path) or not os.path.isfile(source_path):
+                continue
+            relative_path = os.path.relpath(source_path, source_root)
+            if relative_path == os.pardir or relative_path.startswith(f"{os.pardir}{os.sep}"):
+                logger.warning(
+                    "Файл custom_extensions за пределами каталога пропущен: %s",
+                    source_path,
+                )
+                continue
+            files.append((source_path, relative_path))
+
+    return files
+
+
+def _add_custom_extensions_to_archive(zf: zipfile.ZipFile) -> Optional[int]:
+    """Adds the custom extension tree to an open daily ZIP archive."""
+    files = _collect_custom_extension_files()
+    if files is None:
+        return None
+    if not files:
+        zf.writestr(f"{CUSTOM_EXTENSIONS_BACKUP_DIRNAME}/", b"")
+        return 0
+
+    added_count = 0
+    for source_path, relative_path in files:
+        archive_path = (
+            f"{CUSTOM_EXTENSIONS_BACKUP_DIRNAME}/"
+            f"{relative_path.replace(os.sep, '/')}"
+        )
+        try:
+            zf.write(source_path, archive_path)
+            added_count += 1
+        except OSError as e:
+            logger.warning(
+                "Не удалось добавить файл расширения %s в архив: %s",
+                relative_path,
+                e,
+            )
+
+    return added_count
+
+
+def _save_local_custom_extensions_backup(day_dir: str) -> Optional[int]:
+    """Fully replaces the day's local custom extension snapshot."""
+    files = _collect_custom_extension_files()
+    if files is None:
+        return None
+
+    day_root = os.path.abspath(day_dir)
+    destination_root = os.path.abspath(
+        os.path.join(day_root, CUSTOM_EXTENSIONS_BACKUP_DIRNAME)
+    )
+    if os.path.commonpath([day_root, destination_root]) != day_root:
+        raise RuntimeError("Каталог бэкапа custom_extensions находится вне дневного бэкапа")
+
+    temp_root = tempfile.mkdtemp(prefix='.custom_extensions_', dir=day_root)
+    try:
+        for source_path, relative_path in files:
+            destination_path = os.path.abspath(os.path.join(temp_root, relative_path))
+            if os.path.commonpath([temp_root, destination_path]) != temp_root:
+                raise RuntimeError("Некорректный относительный путь custom_extensions")
+            os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+            with open(source_path, 'rb') as source_file, open(
+                destination_path,
+                'xb',
+            ) as destination_file:
+                shutil.copyfileobj(source_file, destination_file, length=1024 * 1024)
+
+        if os.path.lexists(destination_root):
+            destination_real_path = os.path.realpath(destination_root)
+            if os.path.commonpath([day_root, destination_real_path]) != day_root:
+                raise RuntimeError(
+                    "Существующий бэкап custom_extensions ведёт за пределы дневного каталога"
+                )
+            if os.path.islink(destination_root) or not os.path.isdir(destination_root):
+                os.unlink(destination_root)
+            else:
+                shutil.rmtree(destination_root)
+
+        os.replace(temp_root, destination_root)
+        temp_root = ''
+        return len(files)
+    finally:
+        if temp_root:
+            shutil.rmtree(temp_root, ignore_errors=True)
+
+
+async def collect_panel_database_backups() -> PanelBackupCollection:
+    """Downloads a backup of active VPN panels once per daily backup cycle."""
+    backups: list[CollectedPanelBackup] = []
+    warnings: list[PanelBackupWarning] = []
+
+    for server in get_all_servers():
+        if not server.get('is_active'):
+            continue
+
+        server_name = server.get('name') or f"server_{server.get('id', '')}".strip("_")
+        try:
+            client = get_client_from_server_data(server)
+            backup = await client.get_database_backup()
+            filename = _safe_panel_backup_filename(server_name, backup.extension)
+            backups.append(
+                CollectedPanelBackup(
+                    server_name=server_name,
+                    filename=filename,
+                    backup=backup,
+                )
+            )
+            logger.info(
+                "Скачан бэкап панели %s: %s (%s, %s байт)",
+                server_name,
+                filename,
+                backup.db_kind,
+                len(backup.data),
+            )
+        except VPNAPIError as e:
+            message = str(e)
+            logger.warning("Не удалось скачать бэкап панели %s: %s", server_name, message)
+            warnings.append(PanelBackupWarning(server_name=server_name, message=message))
+        except Exception as e:
+            message = f"{type(e).__name__}: {e}"
+            logger.warning("Ошибка при скачивании бэкапа панели %s: %s", server_name, message)
+            warnings.append(PanelBackupWarning(server_name=server_name, message=message))
+
+    return PanelBackupCollection(backups=tuple(backups), warnings=tuple(warnings))
+
+
+def build_backup_caption(today: str, panel_warnings: Sequence[PanelBackupWarning]) -> str:
+    """Collects an HTML-safe caption for a Telegram document with a backup archive."""
+    lines = [
+        f"📦 <b>Ежедневный бэкап за {escape_html(today)}</b>",
+        "",
+        "Содержит базу данных бота, файлы расширений и доступные бэкапы VPN-панелей.",
+    ]
+    if panel_warnings:
+        lines.extend(["", "⚠️ <b>Предупреждения:</b>"])
+        visible_warnings = panel_warnings[:3]
+        for warning in visible_warnings:
+            lines.append(
+                "⚠️ Не удалось скачать бэкап панели "
+                f"{escape_html(warning.server_name)}: "
+                f"{escape_html(_short_panel_warning(warning.message))}"
+            )
+        hidden_count = len(panel_warnings) - len(visible_warnings)
+        if hidden_count > 0:
+            lines.append(f"⚠️ И ещё {hidden_count} ошибок panel backup; подробности в логах.")
+
+    return "\n".join(lines)
+
+
+async def collect_daily_stats() -> str:
+    """
+    Collects daily statistics for the report.
+    
+    Returns:
+        Rich text statistics
+    """
+    # User statistics
+    users = get_users_stats()
+    new_users = get_new_users_count_today()
+    
+    # Key statistics
+    keys = get_keys_stats()
+    
+    # Payment statistics
+    payments = get_daily_payments_stats()
+    
+    # Server statistics
+    servers = get_all_servers()
+    servers_info = []
+    
+    for server in servers:
+        if not server.get('is_active'):
+            servers_info.append(f"  🔴 <b>{server['name']}</b> — выключен")
+            continue
+            
+        try:
+            client = get_client_from_server_data(server)
+            stats = await client.get_stats()
+            
+            if stats.get('online'):
+                traffic = format_traffic(stats.get('total_traffic_bytes', 0))
+                cpu = stats.get('cpu_percent')
+                cpu_text = f", CPU: {cpu}%" if cpu else ""
+                online = stats.get('online_clients', 0)
+                servers_info.append(
+                    f"  🟢 <b>{server['name']}</b>: {online} онлайн, "
+                    f"трафик: {traffic}{cpu_text}"
+                )
+            else:
+                servers_info.append(f"  🔴 <b>{server['name']}</b> — недоступен")
+        except Exception as e:
+            logger.warning(f"Ошибка получения статистики сервера {server['name']}: {e}")
+            servers_info.append(f"  ⚠️ <b>{server['name']}</b> — ошибка подключения")
+    
+    servers_text = "\n".join(servers_info) if servers_info else "  Нет серверов"
+    
+    # Generating the report text
+    today = datetime.now().strftime("%d.%m.%Y")
+    
+    # Payments
+    payments_total = payments.get('paid_count', 0)
+    payments_pending = payments.get('pending_count', 0)
+    
+    payments_text = []
+    base_totals = payments.get('paid_base') or {}
+    if base_totals:
+        from bot.services.money import format_money_minor
+
+        payments_text.extend(
+            format_money_minor(amount, currency)
+            for currency, amount in sorted(base_totals.items())
+            if int(amount or 0) > 0
+        )
+    payments_sum = " + ".join(payments_text) if payments_text else "0"
+    
+    report = f"""📊 <b>Суточная статистика за {today}</b>
+
+👥 <b>Пользователи:</b>
+  Всего: {users.get('total', 0)}
+  Активных: {users.get('active', 0)}
+  Новых за сутки: {new_users}
+
+🔑 <b>VPN-ключи:</b>
+  Всего: {keys.get('total', 0)}
+  Активных: {keys.get('active', 0)}
+  Истёкших: {keys.get('expired', 0)}
+  Создано за сутки: {keys.get('created_today', 0)}
+
+💳 <b>Платежи за сутки:</b>
+  Успешных: {payments_total}
+  Ожидающих: {payments_pending}
+  Сумма: {payments_sum}
+
+🖥️ <b>Серверы:</b>
+{servers_text}
+"""
+    return report
+
+
+async def send_daily_stats(bot: Bot) -> None:
+    """
+    Sends daily statistics to all administrators.
+    
+    Args:
+        bot: Bot instance
+    """
+    try:
+        report = await collect_daily_stats()
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text=report,
+                    parse_mode="HTML",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                logger.info(f"Статистика отправлена админу {admin_id}")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить статистику админу {admin_id}: {e}")
+
+        logger.info("✅ Суточная статистика отправлена")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке суточной статистики: {e}")
+
+
+async def create_backup_archive(
+    panel_backups: Optional[PanelBackupCollection] = None,
+) -> Optional[bytes]:
+    """
+    Creates a ZIP archive with backups.
+    
+    Includes:
+    - vpn_bot.db — bot database
+    - server_NAME_x-ui.db/.dump — backup file of each available VPN panel
+    - custom_extensions/ — custom extension files without runtime caches
+    
+    Returns:
+        ZIP archive bytes or None on error
+    """
+    temp_bot_db_backup = None
+    try:
+        if panel_backups is None:
+            panel_backups = await collect_panel_database_backups()
+
+        archive_buffer = BytesIO()
+        
+        with zipfile.ZipFile(archive_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # Adding a bot database
+            bot_db_path = os.path.abspath(BOT_DB_PATH)
+            if os.path.exists(bot_db_path):
+                os.makedirs(BACKUP_DIR, exist_ok=True)
+                fd, temp_bot_db_backup = tempfile.mkstemp(
+                    prefix='vpn_bot_snapshot_',
+                    suffix='.db',
+                    dir=BACKUP_DIR,
+                )
+                os.close(fd)
+                snapshot_path = backup_bot_database_to(temp_bot_db_backup)
+                zf.write(snapshot_path, 'vpn_bot.db')
+                logger.info(f"Добавлен в архив: vpn_bot.db ({snapshot_path.stat().st_size} байт)")
+            else:
+                logger.warning(f"База данных бота не найдена: {bot_db_path}")
+            
+            # Add already downloaded backup files of VPN panels
+            for item in panel_backups.backups:
+                try:
+                    zf.writestr(item.filename, item.backup.data)
+                    logger.info(
+                        f"Добавлен в архив: {item.filename} ({len(item.backup.data)} байт)"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Не удалось добавить бэкап панели {item.server_name} в архив: {e}"
+                    )
+
+            try:
+                custom_files_count = _add_custom_extensions_to_archive(zf)
+                if custom_files_count is not None:
+                    logger.info(
+                        "Добавлен в архив: custom_extensions (%s файлов)",
+                        custom_files_count,
+                    )
+            except Exception as e:
+                logger.warning(f"Не удалось добавить custom_extensions в архив: {e}")
+        
+        archive_buffer.seek(0)
+        return archive_buffer.read()
+        
+    except Exception as e:
+        logger.error(f"Ошибка при создании архива бэкапов: {e}")
+        return None
+    finally:
+        if temp_bot_db_backup:
+            try:
+                os.unlink(temp_bot_db_backup)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                logger.warning(f"Не удалось удалить временный бэкап БД бота {temp_bot_db_backup}: {e}")
+
+
+async def save_local_backup(
+    panel_backups: Optional[PanelBackupCollection] = None,
+) -> None:
+    """
+    Saves local database and custom extension copies to backup/YYYY-MM-DD/.
+    
+    Panel files are saved in the actual format: SQLite .db
+    or PostgreSQL .dump.
+    """
+    today = datetime.now().strftime("%Y-%m-%d")
+    day_dir = os.path.join(BACKUP_DIR, today)
+    
+    try:
+        if panel_backups is None:
+            panel_backups = await collect_panel_database_backups()
+
+        os.makedirs(day_dir, exist_ok=True)
+        
+        # Saving the bot database
+        bot_db_path = os.path.abspath(BOT_DB_PATH)
+        if os.path.exists(bot_db_path):
+            dest = os.path.join(day_dir, 'vpn_bot.db')
+            backup_bot_database_to(dest)
+            logger.info(f"Локальный бэкап: vpn_bot.db ({os.path.getsize(dest)} байт)")
+        else:
+            logger.warning(f"База данных бота не найдена: {bot_db_path}")
+        
+        # We save already downloaded backup files of VPN panels
+        for item in panel_backups.backups:
+            try:
+                dest = os.path.join(day_dir, item.filename)
+                
+                with open(dest, 'wb') as f:
+                    f.write(item.backup.data)
+                
+                logger.info(f"Локальный бэкап: {item.filename} ({len(item.backup.data)} байт)")
+            except Exception as e:
+                logger.warning(
+                    f"Не удалось сохранить локальный бэкап панели {item.server_name}: {e}"
+                )
+
+        try:
+            custom_files_count = _save_local_custom_extensions_backup(day_dir)
+            if custom_files_count is not None:
+                logger.info(
+                    "Локальный бэкап: custom_extensions (%s файлов)",
+                    custom_files_count,
+                )
+        except Exception as e:
+            logger.warning(f"Не удалось сохранить локальный бэкап custom_extensions: {e}")
+        
+        logger.info(f"✅ Локальные бэкапы сохранены в {day_dir}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении локальных бэкапов: {e}")
+
+
+def cleanup_old_backups() -> None:
+    """
+    Recursively deletes any files and links older than the retention period.
+
+    Pre-update snapshot bundles use the same seven-day policy, but are removed
+    as complete directories and are additionally capped at three applied points.
+    Other backup files retain the generic mtime-based cleanup behavior.
+    """
+    if not os.path.exists(BACKUP_DIR):
+        return
+
+    backup_root = os.path.abspath(BACKUP_DIR)
+    if os.path.islink(backup_root):
+        logger.error("Очистка backup отменена: корневой каталог является ссылкой")
+        return
+    cutoff_timestamp = (
+        datetime.now() - timedelta(days=BACKUP_RETENTION_DAYS)
+    ).timestamp()
+    removed_count = 0
+    pre_update_root = os.path.abspath(
+        os.path.join(backup_root, "pre_update")
+    )
+
+    try:
+        configured_backup_root = os.path.abspath(
+            os.path.join(PROJECT_ROOT, "backup")
+        )
+        if backup_root == configured_backup_root:
+            try:
+                removed_count += cleanup_pre_update_snapshots(
+                    project_root=PROJECT_ROOT,
+                    retention_days=BACKUP_RETENTION_DAYS,
+                    max_points=3,
+                )
+            except Exception as e:
+                logger.error(
+                    "Ошибка при очистке pre-update backup: %s",
+                    e,
+                )
+        for current_root, dirnames, filenames in os.walk(
+            backup_root,
+            topdown=False,
+            followlinks=False,
+        ):
+            current_root = os.path.abspath(current_root)
+            if os.path.commonpath([backup_root, current_root]) != backup_root:
+                logger.error("Пропущен путь за пределами backup: %s", current_root)
+                continue
+            if (
+                current_root == pre_update_root
+                or (
+                    os.path.exists(pre_update_root)
+                    and os.path.commonpath([pre_update_root, current_root])
+                    == pre_update_root
+                )
+            ):
+                continue
+
+            for filename in filenames:
+                file_path = os.path.join(current_root, filename)
+                try:
+                    if os.lstat(file_path).st_mtime < cutoff_timestamp:
+                        os.unlink(file_path)
+                        removed_count += 1
+                        logger.info("Удалён старый бэкап: %s", file_path)
+                except FileNotFoundError:
+                    continue
+                except OSError as e:
+                    logger.warning("Не удалось удалить старый бэкап %s: %s", file_path, e)
+
+            for dirname in dirnames:
+                dir_path = os.path.join(current_root, dirname)
+                try:
+                    if os.path.islink(dir_path):
+                        if os.lstat(dir_path).st_mtime < cutoff_timestamp:
+                            os.unlink(dir_path)
+                            removed_count += 1
+                            logger.info("Удалена старая ссылка из backup: %s", dir_path)
+                        continue
+                    if not os.listdir(dir_path):
+                        os.rmdir(dir_path)
+                except FileNotFoundError:
+                    continue
+                except OSError as e:
+                    logger.warning("Не удалось очистить каталог бэкапа %s: %s", dir_path, e)
+
+        if removed_count > 0:
+            logger.info("🗑️ Удалено старых файлов и ссылок бэкапов: %s", removed_count)
+
+    except Exception as e:
+        logger.error(f"Ошибка при очистке локальных бэкапов: {e}")
+
+
+async def send_backup_archive(bot: Bot) -> None:
+    """
+    Creates and sends a backup archive to all administrators.
+    It also saves local copies and cleans up old backups.
+    
+    Args:
+        bot: Bot instance
+    """
+    try:
+        panel_backups = await collect_panel_database_backups()
+
+        # We save local backups from already collected data
+        await save_local_backup(panel_backups)
+        
+        # Deleting backups older than 7 days
+        cleanup_old_backups()
+        
+        # Create a ZIP archive for sending to Telegram
+        archive_data = await create_backup_archive(panel_backups)
+        
+        if not archive_data:
+            logger.error("Не удалось создать архив бэкапов")
+            return
+        
+        # File name with date
+        today = datetime.now().strftime("%Y-%m-%d")
+        filename = f"backup_{today}.zip"
+        caption = build_backup_caption(today, panel_backups.warnings)
+        
+        # Sent to admins
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_document(
+                    chat_id=admin_id,
+                    document=BufferedInputFile(archive_data, filename=filename),
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=ReplyKeyboardRemove()
+                )
+                logger.info(f"Бэкап отправлен админу {admin_id}")
+            except Exception as e:
+                logger.warning(f"Не удалось отправить бэкап админу {admin_id}: {e}")
+        
+        logger.info(f"✅ Бэкап отправлен ({len(archive_data)} байт)")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке бэкапа: {e}")
+
+
+async def check_and_send_expiry_notifications(bot: Bot) -> None:
+    """
+    Checks and sends notifications about expiring keys.
+    
+    Uses a single HTML contract. Dynamic substitutions 
+    are escaped via escape_html().
+    """
+    logger.info("⏳ Запуск проверки истекающих ключей...")
+    try:
+        from bot.utils.event_placeholders import render_event_message_text
+        from bot.utils.page_renderer import PreparedPageRender, prepare_page_render
+        from bot.utils.text import send_media_or_text
+        days = int(get_setting('notification_days', '3'))
+        from bot.utils.message_editor import get_message_data
+
+        notification_data = get_message_data('notification_text')
+        notification_text = notification_data.get('text') or ''
+        if not notification_text:
+            raise RuntimeError("Required setting 'notification_text' is empty")
+        notification_media = notification_data.get('media_file_id')
+        notification_media_type = notification_data.get('media_type')
+        
+        expiring_keys = get_expiring_keys(days)
+        sent_count = 0
+        
+        for key_info in expiring_keys:
+            vpn_key_id = key_info['vpn_key_id']
+            user_telegram_id = key_info['user_telegram_id']
+            days_left = key_info['days_left']
+            keyname = key_info.get('custom_name') or f"#{vpn_key_id}"
+            
+            # Checking if we sent today
+            if is_notification_sent_today(vpn_key_id):
+                continue
+            
+            event_context = {
+                'key_name': keyname,
+                'key_days_left': days_left,
+            }
+            text = await render_event_message_text(
+                notification_text,
+                'key_expiring',
+                bot=bot,
+                telegram_id=user_telegram_id,
+                context=event_context,
+            )
+            
+            prepared_actions = await prepare_page_render(
+                bot,
+                'expiry_notification_actions',
+                context={
+                    'telegram_id': user_telegram_id,
+                    'key_id': vpn_key_id,
+                    'key_name': keyname,
+                    'key_days_left': days_left,
+                },
+            )
+            kb = (
+                prepared_actions.reply_markup
+                if isinstance(prepared_actions, PreparedPageRender)
+                and prepared_actions.page_key == 'expiry_notification_actions'
+                else None
+            )
+            
+            try:
+                await send_media_or_text(
+                    bot,
+                    chat_id=user_telegram_id,
+                    text=text,
+                    media=notification_media,
+                    media_type=notification_media_type,
+                    reply_markup=kb,
+                )
+                log_notification_sent(vpn_key_id)
+                sent_count += 1
+            except Exception as e:
+                if is_bot_blocked_error(e):
+                    mark_user_bot_blocked(user_telegram_id)
+                    logger.info(f"Пользователь {user_telegram_id} помечен как заблокировавший бота")
+                else:
+                    logger.warning(f"Не удалось отправить уведомление пользователю {user_telegram_id}: {e}")
+            
+            # Slight delay between messages
+            await asyncio.sleep(0.3)
+        
+        if sent_count > 0:
+            logger.info(f"📬 Отправлено {sent_count} уведомлений об истечении ключей")
+        else:
+            logger.info("Нет ключей требующих уведомления")
+    
+    except Exception as e:
+        logger.error(f"Ошибка в check_and_send_expiry_notifications: {e}")
+
+
+def get_seconds_until(target_hour: int, target_minute: int = 0) -> int:
+    """
+    Calculates the number of seconds until the specified time of day.
+    
+    Args:
+        target_hour: Target hour (0-23)
+        target_minute: Target minute (0-59)
+    
+    Returns:
+        Number of seconds until target time
+    """
+    now = datetime.now()
+    target = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+    
+    # If time has already passed today, we plan for tomorrow
+    if target <= now:
+        target += timedelta(days=1)
+    
+    return int((target - now).total_seconds())
+
+
+async def run_daily_key_cleanup(bot: Bot) -> tuple[Optional[Any], Optional[Any]]:
+    """Run both daily key cleanups with independent failure isolation."""
+    from bot.services.key_cleanup import (
+        cleanup_expired_database_keys,
+        cleanup_inactive_panel_clients,
+    )
+
+    panel_report = None
+    database_report = None
+    try:
+        panel_report = await cleanup_inactive_panel_clients()
+    except Exception as exc:
+        logger.error("Daily inactive panel-client cleanup failed: %s", exc)
+
+    try:
+        database_report = await cleanup_expired_database_keys(
+            bot,
+            panel_report=panel_report,
+        )
+    except Exception as exc:
+        logger.error("Daily expired-key database cleanup failed: %s", exc)
+
+    return panel_report, database_report
+
+
+async def run_daily_tasks(bot: Bot) -> None:
+    """
+    Background task for running daily tasks.
+    
+    Schedule:
+    - 03:00 — Daily statistics
+    - 03:05 — Archive with backups
+    
+    Args:
+        bot: Bot instance
+    """
+    logger.info("🕐 Планировщик ежедневных задач запущен")
+    
+    while True:
+        try:
+            # Read the time from the settings or use the default 03:00
+            time_str = get_setting('daily_tasks_time', '03:00')
+            try:
+                target_hour, target_minute = map(int, time_str.split(':'))
+            except Exception as e:
+                logger.error(f"Некорректный формат настройки daily_tasks_time '{time_str}': {e}. Используем 03:00")
+                target_hour, target_minute = 3, 0
+
+            # We wait until the specified time
+            seconds_to_wait = get_seconds_until(target_hour, target_minute)
+            logger.info(f"Следующий запуск задач ({time_str}) через {seconds_to_wait // 3600}ч {(seconds_to_wait % 3600) // 60}м")
+            
+            await asyncio.sleep(seconds_to_wait)
+            
+            # Sending statistics
+            logger.info("📊 Запуск отправки суточной статистики...")
+            await send_daily_stats(bot)
+            
+            # Wait 5 minutes
+            await asyncio.sleep(300)
+            
+            # Sending a backup
+            logger.info("📦 Запуск создания и отправки бэкапа...")
+            await send_backup_archive(bot)
+            
+            # Wait 5 minutes
+            await asyncio.sleep(300)
+            
+            # Sending notifications to users
+            await check_and_send_expiry_notifications(bot)
+
+            # Win-back coupons must be processed before expired keys are removed.
+            try:
+                from bot.services.lapsed_coupons import (
+                    process_lapsed_coupon_deliveries,
+                )
+
+                await process_lapsed_coupon_deliveries(bot)
+            except Exception as e:
+                logger.error(
+                    "Daily lapsed-user coupon delivery failed: %s",
+                    e,
+                )
+            
+            # Monthly traffic reset (1st day of every month)
+            if datetime.now().day == 1:
+                await monthly_traffic_reset(bot)
+
+            # Panel cleanup must follow a possible monthly traffic reset.
+            await run_daily_key_cleanup(bot)
+            
+            # We wait a little so as not to start again at the same minute
+            await asyncio.sleep(60)
+            
+        except asyncio.CancelledError:
+            logger.info("Планировщик ежедневных задач остановлен")
+            break
+        except Exception as e:
+            logger.error(f"Ошибка в планировщике ежедневных задач: {e}")
+            # We wait an hour and try again
+            await asyncio.sleep(3600)
+
+
+async def check_and_notify_updates(bot: Bot) -> None:
+    """
+    Checks for updates and notifies administrators if there are any.
+    
+    Args:
+        bot: Bot instance
+    """
+    if not is_update_notifications_enabled():
+        logger.info("🔕 Уведомления о новых версиях отключены, фоновая проверка пропущена")
+        return
+
+    logger.info("🔍 Ежедневная проверка обновлений...")
+    
+    # Checking if GitHub URL is configured
+    if not GITHUB_REPO_URL:
+        logger.warning("GitHub URL не настроен, пропускаем проверку обновлений")
+        return
+
+    # Checking the unlock conditions
+    try_unblock()
+
+    if is_update_blocked():
+        logger.info("🔒 Обновления заблокированы, отправляем уведомление")
+        msg = get_blocked_message()
+        # OK button to close the notification
+        builder = InlineKeyboardBuilder()
+        builder.row(InlineKeyboardButton(text="✅ OK", callback_data="dismiss_msg"))
+        kb = builder.as_markup()
+        for admin_id in ADMIN_IDS:
+            try:
+                await bot.send_message(
+                    chat_id=admin_id,
+                    text=msg,
+                    reply_markup=kb,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.warning(f"Не удалось отправить уведомление о блокировке админу {admin_id}: {e}")
+        return
+        
+    try:
+        # Checking for updates
+        success, commits_behind, log_text, has_blocking, blocking_commit, is_beta_only = check_for_updates()
+        
+        if success and commits_behind > 0:
+            if is_beta_only:
+                logger.info(f"📦 Найдено {commits_behind} новых коммитов, но все они бета-версии (начинаются с '?'). Уведомление не отправляется.")
+                return
+                
+            logger.info(f"📦 Найдено {commits_behind} новых коммитов")
+            
+            # Update button (same callback_data as in the admin panel)
+            builder = InlineKeyboardBuilder()
+            builder.row(
+                InlineKeyboardButton(
+                    text="🔄 Обновить бота", 
+                    callback_data="admin_update_bot"
+                )
+            )
+            
+            kb = builder.as_markup()
+            
+            # Generating the notification text
+            notify_text = f"📦 <b>Доступно обновление!</b>\n\n{log_text}"
+            
+            # Sending notifications to admins
+            for admin_id in ADMIN_IDS:
+                try:
+                    await bot.send_message(
+                        chat_id=admin_id,
+                        text=notify_text,
+                        reply_markup=kb,
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    logger.warning(f"Не удалось отправить уведомление об обновлении админу {admin_id}: {e}")
+        else:
+            logger.info("✅ Обновлений не найдено")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при проверке обновлений: {e}")
+
+
+async def run_update_check_scheduler(bot: Bot) -> None:
+    """
+    Background task for checking updates daily.
+    
+    Schedule:
+    - 12:00 — Checking for updates
+    
+    Args:
+        bot: Bot instance
+    """
+    logger.info("🕐 Планировщик обновлений запущен")
+    
+    while True:
+        try:
+            # Read the time from the settings or use the default 12:00
+            time_str = get_setting('update_check_time', '12:00')
+            try:
+                target_hour, target_minute = map(int, time_str.split(':'))
+            except Exception as e:
+                logger.error(f"Некорректный формат настройки update_check_time '{time_str}': {e}. Используем 12:00")
+                target_hour, target_minute = 12, 0
+
+            # We wait until the specified time
+            seconds_to_wait = get_seconds_until(target_hour, target_minute)
+            logger.info(f"Следующая проверка обновлений ({time_str}) через {seconds_to_wait // 3600}ч {(seconds_to_wait % 3600) // 60}м")
+            
+            await asyncio.sleep(seconds_to_wait)
+            
+            # Checking for updates
+            await check_and_notify_updates(bot)
+            
+            # We wait 5 minutes so as not to start again
+            await asyncio.sleep(300)
+            
+        except asyncio.CancelledError:
+            logger.info("Планировщик обновлений остановлен")
+            break
+        except Exception as e:
+            logger.error(f"Ошибка в планировщике обновлений: {e}")
+            # We wait an hour and try again
+            await asyncio.sleep(3600)
+
+
+# ============================================================================
+# TRAFFIC SYNCHRONIZATION (every 5 minutes)
+# ============================================================================
+
+# Traffic notification thresholds (% of remaining traffic)
+TRAFFIC_THRESHOLDS = [10, 5, 3, 2, 1, 0]
+
+
+async def _monthly_traffic_reset_impl(bot: Bot) -> None:
+    """
+    Monthly tasks (1st day of each month):
+    
+    1. Reset traffic for keys whose tariff group enables monthly reset
+    2. Reconciliation of the database and the panel (ALWAYS) - correction of discrepancies between expiryTime and totalGB
+    
+    Args:
+        bot: Bot instance
+    """
+    from database.requests import (
+        get_all_active_keys_with_server,
+        get_active_keys_for_monthly_traffic_reset,
+        reset_key_traffic_notification,
+        update_key_traffic_limit,
+    )
+    from bot.services.vpn_api import sync_key_to_panel_state
+    
+    all_keys = get_all_active_keys_with_server()
+    reset_keys = get_active_keys_for_monthly_traffic_reset()
+    reset_enabled = bool(reset_keys)
+    all_servers = get_all_servers()
+    initial_snapshots = await collect_server_snapshots(all_keys, all_servers)
+    
+    # === PART 1: Traffic reset (if enabled) ===
+    reset_success = 0
+    reset_errors = 0
+
+    if reset_enabled:
+        logger.info("🔄 Запуск ежемесячного сброса трафика...")
+        for key in reset_keys:
+            try:
+                if key.get('tariff_system_type') == 'admin_custom':
+                    override = key.get('traffic_limit_override')
+                    tariff_limit = (
+                        int(override)
+                        if override is not None
+                        else int(key.get('traffic_limit', 0) or 0)
+                    )
+                else:
+                    tariff_limit = int(
+                        key.get('tariff_traffic_limit_gb', 0) or 0
+                    ) * (1024 ** 3)
+
+                # The database remains authoritative even when the panel is down.
+                update_key_traffic_limit(key['id'], tariff_limit)
+                reset_key_traffic_notification(key['id'])
+
+                panel_snapshot = initial_snapshots.snapshots.get(
+                    int(key['server_id'])
+                ) if key.get('server_id') is not None else None
+                sync_kwargs = (
+                    {'panel_snapshot': panel_snapshot}
+                    if panel_snapshot is not None
+                    else {}
+                )
+                sync_stats = await sync_key_to_panel_state(
+                    key['id'],
+                    reset_traffic=True,
+                    **sync_kwargs,
+                )
+                if not sync_stats.get('ok') or sync_stats.get('errors'):
+                    raise RuntimeError(
+                        f"Panel reset is incomplete: {sync_stats}"
+                    )
+                reset_success += 1
+            except Exception as e:
+                reset_errors += 1
+                logger.error(f"Ошибка сброса трафика для ключа {key['id']}: {e}")
+    else:
+        logger.info("🔄 Нет активных ключей в группах с ежемесячным сбросом")
+    
+    # === PART 2: Database reconciliation↔panel (ALWAYS) ===
+    logger.info("🔍 Запуск ежемесячной сверки БД↔панель...")
+    sync_fixed = 0
+    sync_errors = 0
+    
+    reconciliation_snapshots = (
+        await collect_server_snapshots(all_keys, all_servers)
+        if reset_enabled
+        else initial_snapshots
+    )
+    reconciliation_plan = await run_db_to_panel_sync(
+        all_keys,
+        all_servers,
+        apply=True,
+        snapshots=reconciliation_snapshots,
+    )
+    sync_fixed = sum(report.changed for report in reconciliation_plan.reports)
+    sync_errors = reconciliation_plan.errors
+
+    # ===Report to admins ===
+    report_parts = ["🔄 <b>Ежемесячное обслуживание</b>\n"]
+    if reset_enabled:
+        report_parts.append(f"📊 <b>Сброс трафика:</b> ✅ {reset_success}")
+        if reset_errors > 0:
+            report_parts.append(f"  ❌ Ошибок: {reset_errors}")
+    report_parts.append(f"🔍 <b>Сверка БД↔панель:</b> 🔧 {sync_fixed}")
+    if sync_errors > 0:
+        report_parts.append(f"  ❌ Ошибок: {sync_errors}")
+    
+    report = "\n".join(report_parts)
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=report,
+                parse_mode="HTML",
+                reply_markup=ReplyKeyboardRemove()
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось отправить отчёт админу {admin_id}: {e}")
+
+async def monthly_traffic_reset(bot: Bot) -> None:
+    """Run monthly panel maintenance under the regular mutation gate."""
+    async with panel_sync_coordinator.regular():
+        await _monthly_traffic_reset_impl(bot)
+
+
+async def sync_traffic_stats(
+    bot: Bot,
+    *,
+    keys: Optional[List[Dict[str, Any]]] = None,
+    servers: Optional[List[Dict[str, Any]]] = None,
+    snapshots: Optional[SnapshotCollection] = None,
+) -> SnapshotCollection:
+    """
+    Queries all servers and updates the traffic cache for each key.
+    Checks notification thresholds and sends notifications to users.
+    
+    Graceful degradation: if the server is unavailable, log WARNING,
+    We do not reset the traffic, we continue processing the remaining servers.
+    """
+    from database.requests import (
+        get_all_active_keys_with_server, bulk_update_traffic,
+        update_key_notified_pct, get_setting
+    )
+    
+    keys = list(keys) if keys is not None else get_all_active_keys_with_server()
+    if not keys:
+        return snapshots or SnapshotCollection()
+    
+    servers = list(servers) if servers is not None else get_all_servers()
+    collection = snapshots or await collect_server_snapshots(keys, servers)
+    for server_id, error in collection.errors.items():
+        logger.warning(
+            "Traffic synchronization skipped server %s: %s",
+            server_id,
+            error,
+        )
+
+    # Only changed cumulative counters are written to SQLite.
+    traffic_updates = collect_changed_traffic_updates(keys, collection.snapshots)
+    
+    # Mass update of traffic in the database
+    if traffic_updates:
+        bulk_update_traffic(traffic_updates)
+
+    # Checking notification thresholds
+    notification_text_template = get_setting('traffic_notification_text') or ''
+    if not notification_text_template:
+        raise RuntimeError("Required setting 'traffic_notification_text' is empty")
+
+    for key in keys:
+        try:
+            server_id = int(key['server_id'])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if server_id not in collection.snapshots:
+            continue
+        if not key.get('_traffic_snapshot_known'):
+            continue
+        traffic_limit = key.get('traffic_limit', 0) or 0
+        if traffic_limit == 0:
+            continue  # Unlimited - skip it
+        
+        # We use the updated value or from the database
+        traffic_used = key.get('_new_traffic_used', key.get('traffic_used', 0) or 0)
+        notified_pct = key.get('traffic_notified_pct', 100)
+        
+        # Calculate the remaining percentage
+        remaining_pct = max(0, (1 - traffic_used / traffic_limit) * 100)
+        
+        # Checking the thresholds
+        for threshold in TRAFFIC_THRESHOLDS:
+            if remaining_pct <= threshold and notified_pct > threshold:
+                # Sending a notification
+                telegram_id = key.get('telegram_id')
+                if telegram_id:
+                    # Forming the key name
+                    keyname = key.get('custom_name') or f"#{key['id']}"
+                    
+                    from bot.utils.event_placeholders import render_event_message_text
+
+                    event_context = {
+                        'key_name': keyname,
+                        'key_traffic_remaining_percent': threshold,
+                        'key_traffic_used_text': format_traffic(traffic_used),
+                        'key_traffic_limit_text': format_traffic(traffic_limit),
+                    }
+                    msg = await render_event_message_text(
+                        notification_text_template,
+                        'key_traffic_low',
+                        bot=bot,
+                        telegram_id=int(telegram_id),
+                        context=event_context,
+                    )
+                    
+                    try:
+                        await bot.send_message(
+                            chat_id=telegram_id,
+                            text=msg,
+                            parse_mode="HTML"
+                        )
+                    except Exception as e:
+                        logger.warning(f"Не удалось отправить уведомление о трафике пользователю {telegram_id}: {e}")
+                
+                # Update the threshold in the database
+                update_key_notified_pct(key['id'], threshold)
+                key['traffic_notified_pct'] = threshold
+                break  # Only one notification at a time
+    
+    # For subscription keys: if according to our traffic counter the traffic is exhausted or
+    # the key has expired - we disconnect ALL clients with this email on the server immediately.
+    # totalGB on individual inbounds is the same, but clients will not disconnect themselves
+    # until their own counter reaches the limit, so we do it manually.
+    from database.db_keys import is_key_active, is_traffic_exhausted
+    from database.requests import get_device_limit_mode
+    from bot.services.vpn_api import ensure_subscription_keys_on_server
+
+    device_limit_mode = get_device_limit_mode()
+    for key in keys:
+        if not key.get('sub_id'):
+            continue
+        # Replace traffic_used with a fresh value for verification
+        merged = dict(key)
+        if '_new_traffic_used' in key:
+            merged['traffic_used'] = key['_new_traffic_used']
+        if is_traffic_exhausted(merged) or not is_key_active(merged):
+            panel_snapshot = collection.snapshots.get(int(key['server_id']))
+            if panel_snapshot is None:
+                continue
+            try:
+                await ensure_subscription_keys_on_server(
+                    key['id'],
+                    panel_snapshot=panel_snapshot,
+                    device_limit_mode=device_limit_mode,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"sync_traffic_stats: ensure_subscription_keys для key {key['id']} "
+                    f"при истечении не удался: {e}"
+                )
+
+    logger.debug(f"Синхронизация трафика завершена: обновлено {len(traffic_updates)} ключей")
+    return collection
+
+
+async def materialize_subscription_state(
+    *,
+    keys: Optional[List[Dict[str, Any]]] = None,
+    servers: Optional[List[Dict[str, Any]]] = None,
+    snapshots: Optional[SnapshotCollection] = None,
+) -> None:
+    """
+    Full pass through all panel-linked keys.
+
+    Active keys are materialized, while existing inactive clients are disabled
+    and missing inactive clients are deliberately left absent.
+
+    Runs once every ~30 minutes (every 6 traffic-sync cycles).
+    """
+    from database.requests import get_all_panel_sync_keys
+    keys = list(keys) if keys is not None else get_all_panel_sync_keys()
+    if not keys:
+        return
+
+    logger.info(f"🔁 materialize_subscription_state: проход по {len(keys)} ключам")
+    servers = list(servers) if servers is not None else get_all_servers()
+    plan = await run_db_to_panel_sync(
+        keys,
+        servers,
+        apply=True,
+        snapshots=snapshots,
+    )
+    stats_total: Dict[str, int] = {}
+    for report in plan.reports:
+        for name, value in report.stats.items():
+            stats_total[name] = stats_total.get(name, 0) + int(value or 0)
+        if report.error:
+            logger.warning(
+                "materialize_subscription_state skipped server %s: %s",
+                report.server_name,
+                report.error,
+            )
+    if any(stats_total.values()):
+        logger.info(f"🔁 materialize_subscription_state завершён: {stats_total}")
+
+
+async def run_traffic_sync_scheduler(bot: Bot) -> None:
+    """
+    Background task to synchronize traffic every 5 minutes.
+    Every 6 cycles (≈30 min) additionally causes
+    materialize_subscription_state() to fit clients on panels
+    under the subscription-only contract.
+
+    Args:
+        bot: Bot instance
+    """
+    logger.info("📊 Планировщик синхронизации трафика запущен (каждые 5 мин, materialize каждые 30 мин)")
+
+    # First launch 30 seconds after the bot starts
+    await asyncio.sleep(30)
+
+    cycle = 0
+    while True:
+        try:
+            async with panel_sync_coordinator.regular():
+                from database.requests import (
+                    get_all_active_keys_with_server,
+                    get_all_panel_sync_keys,
+                )
+
+                cycle_keys = get_all_active_keys_with_server()
+                cycle_servers = get_all_servers()
+                materialize_due = (cycle + 1) % 6 == 0
+                materialization_keys = (
+                    get_all_panel_sync_keys()
+                    if materialize_due
+                    else cycle_keys
+                )
+                cycle_snapshots = await collect_server_snapshots(
+                    materialization_keys,
+                    cycle_servers,
+                )
+                await sync_traffic_stats(
+                    bot,
+                    keys=cycle_keys,
+                    servers=cycle_servers,
+                    snapshots=cycle_snapshots,
+                )
+                try:
+                    from bot.services.key_lifecycle import process_expired_key_lifecycle_events
+
+                    await process_expired_key_lifecycle_events()
+                except Exception as e:
+                    logger.error(f"Ошибка обработки key_expired lifecycle events: {e}")
+                try:
+                    from bot.services.subscription_composition_reconcile import (
+                        enqueue_all_subscription_compositions_for_drift,
+                        process_due_subscription_compositions,
+                    )
+
+                    if materialize_due:
+                        enqueue_all_subscription_compositions_for_drift()
+                    composition_stats = await process_due_subscription_compositions()
+                    if composition_stats.get("seen"):
+                        logger.info(
+                            "subscription composition pass: %s",
+                            composition_stats,
+                        )
+                except Exception as e:
+                    logger.error(
+                        "Ошибка reconciliation составных подписок: %s",
+                        type(e).__name__,
+                    )
+                cycle += 1
+                # Reuse the same snapshots every sixth cycle (about 30 minutes).
+                if materialize_due:
+                    try:
+                        await materialize_subscription_state(
+                            keys=materialization_keys,
+                            servers=cycle_servers,
+                            snapshots=cycle_snapshots,
+                        )
+                    except Exception as e:
+                        logger.error(f"Ошибка в materialize_subscription_state: {e}")
+
+            # Wait 5 minutes
+            await asyncio.sleep(300)
+
+        except asyncio.CancelledError:
+            logger.info("Планировщик синхронизации трафика остановлен")
+            break
+        except Exception as e:
+            logger.error(f"Ошибка в планировщике синхронизации трафика: {e}")
+            # Wait 2 minutes and try again
+            await asyncio.sleep(120)

@@ -1,0 +1,566 @@
+"""Business history of key and balance transactions."""
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+from typing import Any
+
+from .connection import get_db
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    'apply_balance_operation',
+    'apply_key_days_operation_once',
+    'create_business_operation_tables',
+    'get_first_active_key_for_user',
+    'has_balance_operation_reference',
+    'get_key_operation_history',
+    'record_key_operation',
+]
+
+_BALANCE_OPERATION_TYPES = {'credit', 'debit'}
+
+
+def has_balance_operation_reference(
+    *,
+    user_id: int,
+    operation_type: str,
+    source: str,
+    reference_type: str,
+    reference_id: str,
+) -> bool:
+    """Checks whether an idempotent balance side effect was already recorded."""
+    with get_db() as conn:
+        create_business_operation_tables(conn)
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM balance_operations
+            WHERE user_id = ?
+              AND operation_type = ?
+              AND source = ?
+              AND reference_type = ?
+              AND reference_id = ?
+            LIMIT 1
+            """,
+            (
+                int(user_id),
+                str(operation_type),
+                str(source),
+                str(reference_type),
+                str(reference_id),
+            ),
+        ).fetchone()
+        return row is not None
+
+
+def create_business_operation_tables(conn: sqlite3.Connection) -> None:
+    """Creates regular logs of kernel business operations."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS key_operation_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            vpn_key_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            operation_type TEXT NOT NULL,
+            delta_days INTEGER DEFAULT 0,
+            source TEXT NOT NULL,
+            reason TEXT,
+            reference_type TEXT,
+            reference_id TEXT,
+            expires_before TEXT,
+            expires_after TEXT,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_operation_log_key_created
+        ON key_operation_log(vpn_key_id, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_key_operation_log_user_created
+        ON key_operation_log(user_id, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS balance_operations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            operation_type TEXT NOT NULL,
+            delta_cents INTEGER NOT NULL,
+            delta_minor INTEGER NOT NULL DEFAULT 0,
+            currency TEXT NOT NULL DEFAULT 'RUB',
+            balance_before INTEGER NOT NULL,
+            balance_after INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            reason TEXT,
+            reference_type TEXT,
+            reference_id TEXT,
+            performed_by INTEGER,
+            metadata TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    balance_columns = {
+        str(row['name']) for row in conn.execute('PRAGMA table_info(balance_operations)').fetchall()
+    }
+    if 'currency' not in balance_columns:
+        conn.execute("ALTER TABLE balance_operations ADD COLUMN currency TEXT NOT NULL DEFAULT 'RUB'")
+    if 'delta_minor' not in balance_columns:
+        conn.execute("ALTER TABLE balance_operations ADD COLUMN delta_minor INTEGER NOT NULL DEFAULT 0")
+        conn.execute("UPDATE balance_operations SET delta_minor = delta_cents")
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_balance_operations_user_created
+        ON balance_operations(user_id, created_at)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_balance_operations_reference
+        ON balance_operations(reference_type, reference_id)
+        """
+    )
+
+
+def get_first_active_key_for_user(user_id: int) -> dict[str, Any] | None:
+    """Returns the user's first active key for domain accrual days."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            """
+            SELECT *
+            FROM vpn_keys
+            WHERE user_id = ?
+              AND (expires_at > datetime('now') OR expires_at IS NULL)
+            ORDER BY expires_at IS NULL, expires_at DESC
+            LIMIT 1
+            """,
+            (int(user_id),),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def apply_key_days_operation_once(
+    *,
+    user_id: int,
+    days: int,
+    source: str,
+    reason: str,
+    reference_type: str,
+    reference_id: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Atomically extends one active key and records an idempotent payment reward."""
+    normalized_user_id = _positive_int(user_id, 'user_id')
+    normalized_days = _positive_int(days, 'days')
+    normalized_source = _text(source, 'source')
+    normalized_reference_type = _text(reference_type, 'reference_type')
+    normalized_reference_id = _text(reference_id, 'reference_id')
+    with get_db() as conn:
+        create_business_operation_tables(conn)
+        existing = conn.execute(
+            """
+            SELECT * FROM key_operation_log
+            WHERE user_id = ? AND source = ?
+              AND reference_type = ? AND reference_id = ?
+            LIMIT 1
+            """,
+            (
+                normalized_user_id,
+                normalized_source,
+                normalized_reference_type,
+                normalized_reference_id,
+            ),
+        ).fetchone()
+        if existing:
+            unlimited_noop = (
+                existing['operation_type'] == 'grant_days_unlimited_noop'
+            )
+            return {
+                'ok': True,
+                'status': (
+                    'already_unlimited'
+                    if unlimited_noop
+                    else 'already_applied'
+                ),
+                'already_applied': True,
+                'key_id': int(existing['vpn_key_id']),
+                'operation_id': int(existing['id']),
+                'days': int(existing['delta_days'] or normalized_days),
+            }
+
+        key = conn.execute(
+            """
+            SELECT id, expires_at FROM vpn_keys
+            WHERE user_id = ?
+              AND (expires_at > datetime('now') OR expires_at IS NULL)
+            ORDER BY expires_at IS NULL, expires_at DESC
+            LIMIT 1
+            """,
+            (normalized_user_id,),
+        ).fetchone()
+        if not key:
+            return {
+                'ok': False,
+                'status': 'no_op',
+                'reason': 'no_active_key',
+                'user_id': normalized_user_id,
+                'days': normalized_days,
+            }
+
+        key_id = int(key['id'])
+        if key['expires_at'] is None:
+            operation = conn.execute(
+                """
+                INSERT INTO key_operation_log (
+                    vpn_key_id, user_id, operation_type, delta_days, source,
+                    reason, reference_type, reference_id,
+                    expires_before, expires_after, metadata
+                )
+                VALUES (?, ?, 'grant_days_unlimited_noop', ?, ?, ?, ?, ?,
+                        NULL, NULL, ?)
+                """,
+                (
+                    key_id,
+                    normalized_user_id,
+                    normalized_days,
+                    normalized_source,
+                    _optional_text(reason),
+                    normalized_reference_type,
+                    normalized_reference_id,
+                    _json_metadata(metadata or {}),
+                ),
+            )
+            return {
+                'ok': True,
+                'status': 'already_unlimited',
+                'already_applied': True,
+                'key_id': key_id,
+                'user_id': normalized_user_id,
+                'days': normalized_days,
+                'operation_id': int(operation.lastrowid),
+                'expires_before': None,
+                'expires_after': None,
+            }
+        expires_before = str(key['expires_at'])
+        modifier = f'{normalized_days:+} days'
+        conn.execute(
+            """
+            UPDATE vpn_keys
+            SET expires_at = MAX(
+                datetime('now'),
+                datetime(
+                    CASE WHEN expires_at > datetime('now')
+                         THEN expires_at ELSE datetime('now') END,
+                    ?
+                )
+            )
+            WHERE id = ? AND user_id = ?
+            """,
+            (modifier, key_id, normalized_user_id),
+        )
+        expires_after_row = conn.execute(
+            "SELECT expires_at FROM vpn_keys WHERE id = ?",
+            (key_id,),
+        ).fetchone()
+        expires_after = str(expires_after_row['expires_at'])
+        operation = conn.execute(
+            """
+            INSERT INTO key_operation_log (
+                vpn_key_id, user_id, operation_type, delta_days, source,
+                reason, reference_type, reference_id,
+                expires_before, expires_after, metadata
+            )
+            VALUES (?, ?, 'grant_days', ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                key_id,
+                normalized_user_id,
+                normalized_days,
+                normalized_source,
+                _optional_text(reason),
+                normalized_reference_type,
+                normalized_reference_id,
+                expires_before,
+                expires_after,
+                _json_metadata(metadata or {}),
+            ),
+        )
+        return {
+            'ok': True,
+            'status': 'applied',
+            'already_applied': False,
+            'key_id': key_id,
+            'user_id': normalized_user_id,
+            'days': normalized_days,
+            'operation_id': int(operation.lastrowid),
+            'expires_before': expires_before,
+            'expires_after': expires_after,
+        }
+
+
+def record_key_operation(
+    *,
+    key_id: int,
+    user_id: int,
+    operation_type: str,
+    delta_days: int = 0,
+    source: str,
+    reason: str | None = None,
+    reference_type: str | None = None,
+    reference_id: str | None = None,
+    expires_before: str | None = None,
+    expires_after: str | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> int:
+    """Writes a visible business history of the key transaction."""
+    with get_db() as conn:
+        create_business_operation_tables(conn)
+        cursor = conn.execute(
+            """
+            INSERT INTO key_operation_log (
+                vpn_key_id, user_id, operation_type, delta_days, source,
+                reason, reference_type, reference_id,
+                expires_before, expires_after, metadata
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                _positive_int(key_id, 'key_id'),
+                _positive_int(user_id, 'user_id'),
+                _text(operation_type, 'operation_type'),
+                int(delta_days or 0),
+                _text(source, 'source'),
+                _optional_text(reason),
+                _optional_text(reference_type),
+                _optional_text(reference_id),
+                _optional_text(expires_before),
+                _optional_text(expires_after),
+                _json_metadata(metadata or {}),
+            ),
+        )
+        operation_id = int(cursor.lastrowid)
+        logger.info(
+            "Записана операция ключа id=%s key=%s source=%s days=%s",
+            operation_id,
+            key_id,
+            source,
+            delta_days,
+        )
+        return operation_id
+
+
+def get_key_operation_history(key_id: int) -> list[dict[str, Any]]:
+    """Returns the non-payment transaction history of the key."""
+    with get_db() as conn:
+        create_business_operation_tables(conn)
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                created_at AS paid_at,
+                operation_type,
+                delta_days,
+                source AS operation_source,
+                reason,
+                reference_type,
+                reference_id,
+                expires_before,
+                expires_after,
+                metadata,
+                'key_operation' AS history_type
+            FROM key_operation_log
+            WHERE vpn_key_id = ?
+            ORDER BY created_at DESC
+            """,
+            (_positive_int(key_id, 'key_id'),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
+def apply_balance_operation(
+    *,
+    user_id: int,
+    operation_type: str,
+    cents: int,
+    source: str,
+    reason: str,
+    reference_type: str | None = None,
+    reference_id: str | None = None,
+    performed_by: int | None = None,
+    metadata: dict[str, Any] | None = None,
+    currency: str | None = None,
+) -> dict[str, Any]:
+    """Atomically changes the user's balance and writes a regular history."""
+    user_id = _positive_int(user_id, 'user_id')
+    operation = _balance_operation_type(operation_type)
+    amount = _positive_int(cents, 'cents')
+    source_text = _text(source, 'source')
+    reason_text = _text(reason, 'reason')
+
+    with get_db() as conn:
+        create_business_operation_tables(conn)
+        if currency is None:
+            try:
+                currency_row = conn.execute(
+                    "SELECT value FROM settings WHERE key = 'base_currency'"
+                ).fetchone()
+            except sqlite3.OperationalError:
+                currency_row = None
+            operation_currency = str(currency_row['value'] if currency_row else 'RUB').upper()
+        else:
+            operation_currency = str(currency).upper()
+        if operation_currency not in {'RUB', 'USD'}:
+            raise ValueError('currency должен быть RUB или USD')
+        if reference_type and reference_id:
+            existing = conn.execute(
+                """
+                SELECT * FROM balance_operations
+                WHERE user_id = ? AND operation_type = ? AND source = ?
+                  AND reference_type = ? AND reference_id = ?
+                LIMIT 1
+                """,
+                (
+                    user_id,
+                    operation,
+                    source_text,
+                    str(reference_type),
+                    str(reference_id),
+                ),
+            ).fetchone()
+            if existing:
+                return {
+                    'ok': True,
+                    'status': 'already_applied',
+                    'already_applied': True,
+                    'operation_id': int(existing['id']),
+                    'user_id': user_id,
+                    'operation_type': operation,
+                    'delta_cents': int(existing['delta_cents']),
+                    'delta_minor': int(existing['delta_minor']),
+                    'currency': str(existing['currency']),
+                    'balance_before': int(existing['balance_before']),
+                    'balance_after': int(existing['balance_after']),
+                    'performed_by': existing['performed_by'],
+                }
+        row = conn.execute(
+            "SELECT personal_balance FROM users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+        if not row:
+            return {'ok': False, 'status': 'user_not_found'}
+
+        before = int(row['personal_balance'] or 0)
+        delta = amount if operation == 'credit' else -amount
+        after = before + delta
+        if after < 0:
+            return {
+                'ok': False,
+                'status': 'insufficient_funds',
+                'balance_before': before,
+                'balance_after': before,
+                'delta_cents': 0,
+                'delta_minor': 0,
+                'currency': operation_currency,
+            }
+
+        cursor = conn.execute(
+            "UPDATE users SET personal_balance = ? WHERE id = ?",
+            (after, user_id),
+        )
+        if cursor.rowcount <= 0:
+            return {'ok': False, 'status': 'user_not_found'}
+
+        history = conn.execute(
+            """
+            INSERT INTO balance_operations (
+                user_id, operation_type, delta_cents, delta_minor, currency,
+                balance_before, balance_after, source, reason,
+                reference_type, reference_id, performed_by, metadata
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                operation,
+                delta,
+                delta,
+                operation_currency,
+                before,
+                after,
+                source_text,
+                reason_text,
+                _optional_text(reference_type),
+                _optional_text(reference_id),
+                performed_by if performed_by is None else _positive_int(performed_by, 'performed_by'),
+                _json_metadata(metadata or {}),
+            ),
+        )
+        operation_id = int(history.lastrowid)
+        logger.info(
+            "Баланс user=%s изменён на %s коп source=%s operation_id=%s",
+            user_id,
+            delta,
+            source_text,
+            operation_id,
+        )
+        return {
+            'ok': True,
+            'status': 'applied',
+            'operation_id': operation_id,
+            'user_id': user_id,
+            'operation_type': operation,
+            'delta_cents': delta,
+            'delta_minor': delta,
+            'currency': operation_currency,
+            'balance_before': before,
+            'balance_after': after,
+            'performed_by': performed_by,
+        }
+
+
+def _balance_operation_type(value: Any) -> str:
+    operation = _text(value, 'operation_type')
+    if operation not in _BALANCE_OPERATION_TYPES:
+        raise ValueError('operation_type должен быть credit или debit')
+    return operation
+
+
+def _positive_int(value: Any, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f'{field} должен быть положительным integer')
+    return int(value)
+
+
+def _text(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f'{field} должен быть строкой')
+    text = value.strip()
+    if not text:
+        raise ValueError(f'{field} не может быть пустым')
+    if len(text) > 256:
+        raise ValueError(f'{field} не может быть длиннее 256 символов')
+    return text
+
+
+def _optional_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError('опциональное текстовое поле должно быть строкой')
+    text = value.strip()
+    return text[:256] if text else None
+
+
+def _json_metadata(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
