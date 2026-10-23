@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Привязка Telegram — ButovskyVPN{% endblock %}
+{% block content %}
+<section class="section tight"><div class="container narrow">
+  <div class="auth-card center">
+    <h1>Привязать Telegram</h1>
+    {% if user.telegram_id %}
+      <div class="alert alert-ok">✅ Уже привязано: Telegram ID <b>{{ user.telegram_id }}</b></div>
+      <p class="muted">Ключи из бота и с сайта отображаются вместе в вашем кабинете.</p>
+    {% else %}
+      <p>Нажмите кнопку — бот откроется с командой привязки, и вы вернётесь сюда автоматически.</p>
+      <a class="btn btn-primary btn-lg" href="{{ deep_link }}" target="_blank">🔗 Привязать через @{{ bot_username }}</a>
+    {% endif %}
+    <p style="margin-top:24px"><a href="/account">← В личный кабинет</a></p>
+  </div>
+</div></section>
+{% endblock %}

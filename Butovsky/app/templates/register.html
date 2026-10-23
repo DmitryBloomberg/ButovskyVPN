@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Регистрация — ButovskyVPN{% endblock %}
+{% block content %}
+<section class="section tight"><div class="container narrow">
+  <div class="auth-card">
+    <h1>Создать аккаунт</h1>
+    <p class="muted">После регистрации привяжите Telegram — ключи с сайта и из бота будут в одном кабинете.</p>
+    {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+    <form method="post">
+      <label>Email<input type="email" name="email" required autofocus></label>
+      <label>Пароль (мин. 6 символов)<input type="password" name="password" minlength="6" required></label>
+      <label>Повторите пароль<input type="password" name="password2" minlength="6" required></label>
+      <button class="btn btn-primary btn-block" type="submit">Зарегистрироваться</button>
+    </form>
+    <p class="muted center">Уже с нами? <a href="/login">Войти</a></p>
+  </div>
+</div></section>
+{% endblock %}

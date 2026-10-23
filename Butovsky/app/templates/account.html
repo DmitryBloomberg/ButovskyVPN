@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Личный кабинет — ButovskyVPN{% endblock %}
+{% block content %}
+<section class="page-head"><div class="container">
+  <h1>Личный кабинет</h1>
+  <p class="muted">{{ user.email }} ·
+    {% if user.telegram_id %}Telegram: <b>{{ user.telegram_id }}</b>{% else %}Telegram не привязан{% endif %}</p>
+  {% if not user.telegram_id %}<a class="btn btn-primary" href="/link-telegram">🔗 Привязать Telegram</a>{% endif %}
+</div></section>
+
+<section class="section tight"><div class="container">
+  <h2 class="section-title sm">Мои ключи <span class="muted">(сайт + бот)</span></h2>
+  {% if keys %}
+  <div class="key-list">
+    {% for k in keys %}
+    <div class="key-card {% if k.source == 'bot' %}from-bot{% endif %}">
+      <div class="key-head">
+        <b>{{ k.tariff_name or 'Подписка' }}</b>
+        <span class="chip small">{% if k.source == 'bot' %}🤖 из бота{% else %}🌐 с сайта{% endif %}</span>
+        {% if k.server_name %}<span class="chip small">🌍 {{ k.server_name }}</span>{% endif %}
+      </div>
+      <div class="key-meta muted">Действует до: {{ k.expires_at or '—' }}</div>
+      {% if k.subscription_url %}
+      <div class="suburl">
+        <input readonly value="{{ k.subscription_url }}" onclick="this.select()">
+        <button class="btn btn-ghost copy-btn" data-copy="{{ k.subscription_url }}">Копировать</button>
+        <a class="btn btn-primary" href="{{ k.subscription_url }}" target="_blank">Открыть</a>
+      </div>
+      {% else %}
+      <div class="muted small">Ссылка подписки появится после активации.</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">Ключей пока нет. <a href="/tariffs">Выбрать тариф →</a></div>
+  {% endif %}
+</div></section>
+
+<section class="section alt"><div class="container">
+  <h2 class="section-title sm">История заказов</h2>
+  {% if orders %}
+  <table class="table">
+    <tr><th>Заказ</th><th>Тариф</th><th>Сумма</th><th>Оплата</th><th>Статус</th><th>Дата</th></tr>
+    {% for o in orders %}
+    <tr>
+      <td>{{ o.order_id }}</td>
+      <td>{{ o.tariff_name or o.tariff_id }}</td>
+      <td>{{ (o.amount_minor / 100)|round(2) }} ₽</td>
+      <td>{% if o.method=='platega' %}Platega{% elif o.method=='stars' %}Stars{% else %}{{ o.method }}{% endif %}</td>
+      <td><span class="status status-{{ o.status }}">{{ o.status }}</span></td>
+      <td>{{ o.created_at }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}<div class="empty">Заказов ещё не было.</div>{% endif %}
+</div></section>
+{% endblock %}

@@ -1,0 +1,37 @@
+# -*- coding: utf-8 -*-
+"""Конфигурация сайта ButovskyVPN. Скопируйте в config.py и заполните."""
+import os
+
+# Путь к базе данных бота (sqlite). Если оставить пустым — используется ./database/vpn_bot.db
+BOT_DB_PATH = os.getenv("BOT_DB_PATH", "")
+
+# Секрет для подписи сессий сайта (задайте длинную случайную строку!)
+SECRET_KEY = os.getenv("SECRET_KEY", "CHANGE_ME_RANDOM_LONG_STRING")
+
+# Токен Telegram-бота (для оплаты Telegram Stars и deep-link привязки)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
+# Имя пользователя бота (без @) — для ссылок t.me/...
+BOT_USERNAME = os.getenv("BOT_USERNAME", "ButovskyVPN_bot")
+
+# Внешний базовый URL сайта (для return-ссылок Platega)
+SITE_URL = os.getenv("SITE_URL", "https://butovskyvpn.duckdns.org")
+
+# Порт, на котором служает сайт (Nginx проксирует на него)
+WEB_PORT = int(os.getenv("WEB_PORT", "8090"))
+
+# --- Platega (app.platega.io) ---
+# Если пусто — берутся из таблицы settings базы бота (platega_merchant_id / platega_secret),
+# настроенных через админку бота.
+PLATEGA_MERCHANT_ID = os.getenv("PLATEGA_MERCHANT_ID", "")
+PLATEGA_SECRET = os.getenv("PLATEGA_SECRET", "")
+
+# --- 3x-UI панель ---
+# По умолчанию данные панели берутся из таблицы `servers` базы бота
+# (login/password хранятся там же, в открытом/зашифрованном виде как у бота).
+PANEL_URL = os.getenv("PANEL_URL", "")        # например https://127.0.0.1:2053/secret-path
+PANEL_LOGIN = os.getenv("PANEL_LOGIN", "")    # логин панели (совпадает с логином бота)
+PANEL_PASSWORD = os.getenv("PANEL_PASSWORD", "")
+
+# Webhook-секрет для проверки incoming-запросов от бота (дублирование ключей)
+BOT_SYNC_SECRET = os.getenv("BOT_SYNC_SECRET", "CHANGE_ME_SYNC_SECRET")

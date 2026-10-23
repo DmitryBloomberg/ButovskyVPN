@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}ButovskyVPN — быстрый и безопасный VPN{% endblock %}
+{% block content %}
+<section class="hero">
+  <div class="container hero-inner">
+    <div class="hero-text">
+      <span class="badge">🚀 Работает на Windows, macOS, iOS, Android, Linux</span>
+      <h1>Интернет без границ<br><span class="grad">за 2 минуты</span></h1>
+      <p class="lead">Быстрый VPN на протоколе XRay/VLESS. Ключи выдаются мгновенно после оплаты —
+        на сайте или в Telegram-боте. Один аккаунт, единая подписка.</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary btn-lg" href="/tariffs">Выбрать тариф</a>
+        <a class="btn btn-ghost btn-lg" href="https://t.me/{{ bot_username }}" target="_blank">Купить в боте</a>
+      </div>
+      <div class="hero-stats">
+        <div><b>{{ servers_count if servers_count else '—' }}</b><span>локаций</span></div>
+        <div><b>99.9%</b><span>аптайм</span></div>
+        <div><b>24/7</b><span>поддержка</span></div>
+      </div>
+    </div>
+    <div class="hero-art">
+      <div class="globe-card">
+        <div class="pulse"></div>
+        <div class="lock">🔒</div>
+        <div class="card-lines"><i></i><i></i><i></i></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="pricing">
+  <div class="container">
+    <h2 class="section-title">Тарифы <span class="muted">— те же, что в боте</span></h2>
+    {% if tariffs %}
+    <div class="grid cards">
+      {% for t in tariffs %}
+      <div class="price-card">
+        {% if loop.index == 1 %}<span class="tag hot">Хит</span>{% endif %}
+        <h3>{{ t.name }}</h3>
+        <div class="price">{{ "%.0f"|format(t.price_rub) }} ₽</div>
+        <div class="per">{{ t.duration_days }} дн. · {{ (t.price_rub / t.duration_days * 30)|round(0)|int }} ₽/мес</div>
+        <ul class="features">
+          <li>⚡ Безлимитная скорость</li>
+          <li>📡 Трафик: {% if t.traffic_limit_gb %}{{ t.traffic_limit_gb }} ГБ{% else %}безлимит{% endif %}</li>
+          <li>💻 Устройств: {% if t.max_ips %}{{ t.max_ips }}{% else %}∞{% endif %}</li>
+          <li>🔁 Продление в один клик</li>
+        </ul>
+        <a class="btn btn-primary card-btn" href="/checkout/{{ t.id }}">Купить</a>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty">Тарифы появятся здесь, как только их настроит администратор в боте.</div>
+    {% endif %}
+  </div>
+</section>
+
+<section class="section alt" id="how">
+  <div class="container">
+    <h2 class="section-title">Как это работает</h2>
+    <div class="grid steps">
+      <div class="step"><b>1</b><h4>Регистрация</h4><p>Создайте аккаунт на сайте и при желании привяжите Telegram — ключи будут общими.</p></div>
+      <div class="step"><b>2</b><h4>Оплата</h4><p>Картой через Platega или Telegram Stars. Чек и история — в личном кабинете.</p></div>
+      <div class="step"><b>3</b><h4>Ключ сразу</h4><p>Ссылка-подписка появляется в кабинете и дублируется в Telegram-бот.</p></div>
+      <div class="step"><b>4</b><h4>Подключение</h4><p>VLESS:// ссылка подходит для любых клиентов: v2rayN, Streisand, Happ, Hiddify.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="faq">
+  <div class="container narrow">
+    <h2 class="section-title">Частые вопросы</h2>
+    <details><summary>Где посмотреть купленные ключи?</summary><p>В личном кабинете сайта и в меню бота «Мои ключи» — список синхронизирован по вашему Telegram ID.</p></details>
+    <details><summary>Какие способы оплаты доступны?</summary><p>Банковская карта через платёжного провайдера Platega (app.platega.io) и Telegram Stars.</p></details>
+    <details><summary>На скольких устройствах можно пользоваться?</summary><p>Зависит от тарифа — количество одновременных устройств указано в описании каждого плана.</p></details>
+    <details><summary>Что делать, если ключ перестал работать?</summary><p>Напишите в поддержку @ButovskyVPN_bot — заменим ключ бесплатно.</p></details>
+  </div>
+</section>
+
+<section class="cta-band">
+  <div class="container cta-inner">
+    <div>
+      <h3>Готовы подключиться?</h3>
+      <p class="muted">Оплата картой или звёздами · выдача мгновенно · отмена в любой момент</p>
+    </div>
+    <a class="btn btn-primary btn-lg" href="/register">Создать аккаунт</a>
+  </div>
+</section>
+{% endblock %}

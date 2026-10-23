@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Вход — ButovskyVPN{% endblock %}
+{% block content %}
+<section class="section tight"><div class="container narrow">
+  <div class="auth-card">
+    <h1>С возвращением 👋</h1>
+    {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+    <form method="post">
+      <label>Email<input type="email" name="email" required autofocus></label>
+      <label>Пароль<input type="password" name="password" required></label>
+      <button class="btn btn-primary btn-block" type="submit">Войти</button>
+    </form>
+    <p class="muted center">Нет аккаунта? <a href="/register">Зарегистрироваться</a></p>
+  </div>
+</div></section>
+{% endblock %}

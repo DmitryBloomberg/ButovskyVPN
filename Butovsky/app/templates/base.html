@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}ButovskyVPN{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="/">🛡️ <span>Butovsky<b>VPN</b></span></a>
+    <nav class="nav">
+      <a href="/tariffs">Тарифы</a>
+      <a href="/#how">Как это работает</a>
+      <a href="/#faq">FAQ</a>
+      {% if user %}<a href="/account">Кабинет</a>{% endif %}
+    </nav>
+    <div class="header-actions">
+      <button class="theme-toggle" id="themeToggle" title="Сменить тему">🌙</button>
+      {% if user %}
+        <a class="btn btn-ghost" href="/logout">Выйти</a>
+        <a class="btn btn-primary" href="/account">👤 {{ user.username or user.email.split('@')[0] }}</a>
+      {% else %}
+        <a class="btn btn-ghost" href="/login">Вход</a>
+        <a class="btn btn-primary" href="/register">Регистрация</a>
+      {% endif %}
+    </div>
+  </div>
+</header>
+
+<main>
+{% block content %}{% endblock %}
+</main>
+
+<footer class="site-footer">
+  <div class="container footer-inner">
+    <div>© 2026 ButovskyVPN — быстрый и надёжный VPN</div>
+    <div class="footer-links">
+      <a href="https://t.me/{{ bot_username }}" target="_blank">Telegram-бот</a>
+      <a href="/tariffs">Тарифы</a>
+    </div>
+  </div>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

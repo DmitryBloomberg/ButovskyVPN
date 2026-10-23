@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Статус оплаты — ButovskyVPN{% endblock %}
+{% block content %}
+<section class="section tight"><div class="container narrow">
+  <div class="auth-card center">
+    {% if order.status in ('paid','fulfilled') %}
+      <div class="alert alert-ok">✅ Оплачено! Заказ <b>{{ order.order_id }}</b></div>
+      {% if stars_pending and order.status == 'paid' %}
+      <p class="muted">Бот подтверждает платёж… Обновите страницу через несколько секунд.</p>
+      <script>setTimeout(()=>location.reload(), 4000)</script>
+      {% endif %}
+      <p><a class="btn btn-primary btn-lg" href="/account">🔑 Перейти к моим ключам</a></p>
+    {% elif order.status == 'pending' %}
+      <div class="alert">⏳ Платёж обрабатывается. Если вы только что оплатили — ключ появится в кабинете в течение минуты.</div>
+      <script>setTimeout(()=>location.reload(), 5000)</script>
+      <p><a class="btn btn-ghost" href="">Обновить сейчас</a></p>
+    {% else %}
+      <div class="alert alert-error">❌ Заказ отменён или оплата не прошла.</div>
+      <p><a class="btn btn-primary" href="/tariffs">Выбрать другой тариф</a></p>
+    {% endif %}
+  </div>
+</div></section>
+{% endblock %}

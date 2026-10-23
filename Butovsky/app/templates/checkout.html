@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Оформление — ButovskyVPN{% endblock %}
+{% block content %}
+<section class="section tight"><div class="container narrow">
+  <div class="auth-card">
+    <h1>Оформление заказа</h1>
+    <div class="order-summary">
+      <div><span class="muted">Тариф:</span> <b>{{ tariff.name }}</b></div>
+      <div><span class="muted">Срок:</span> {{ tariff.duration_days }} дн. · Трафик:
+        {% if tariff.traffic_limit_gb %}{{ tariff.traffic_limit_gb }} ГБ{% else %}безлимит{% endif %}</div>
+      <div class="total-line"><span class="muted">К оплате:</span> <b class="price-lg">{{ "%.0f"|format(tariff.price_rub) }} ₽</b></div>
+    </div>
+    <form method="post">
+      {% if servers %}
+      <label>Сервер
+        <select name="server_id">
+          {% for s in servers %}<option value="{{ s.id }}">🌍 {{ s.name }}</option>{% endfor %}
+        </select>
+      </label>
+      {% endif %}
+      <fieldset class="pay-methods">
+        <legend>Способ оплаты</legend>
+        {% if platega_on %}
+        <label class="pay-opt"><input type="radio" name="method" value="platega" checked>
+          <span>💳 Картой через <b>Platega</b></span></label>
+        {% endif %}
+        {% if stars_on %}
+        <label class="pay-opt"><input type="radio" name="method" value="stars">
+          <span>⭐ Telegram Stars (~{{ stars_amount }} ⭐)</span></label>
+        {% endif %}
+        {% if not platega_on and not stars_on %}
+          <div class="alert alert-error">Способы оплаты временно недоступны. Привяжите Telegram или напишите в поддержку.</div>
+        {% endif %}
+        {% if not stars_on %}<div class="muted small">⭐ Доступно после привязки Telegram (<a href="/link-telegram">привязать</a>)</div>{% endif %}
+      </fieldset>
+      <button class="btn btn-primary btn-block btn-lg" type="submit">Перейти к оплате</button>
+    </form>
+  </div>
+</div></section>
+{% endblock %}

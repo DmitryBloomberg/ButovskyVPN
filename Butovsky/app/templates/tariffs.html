@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}Тарифы — ButovskyVPN{% endblock %}
+{% block content %}
+<section class="page-head"><div class="container">
+  <h1>Тарифы и цены</h1>
+  <p class="muted">Цены идентичны боту @{{ bot_username }}. Оплата картой (Platega) или Telegram Stars.</p>
+</div></section>
+<section class="section tight"><div class="container">
+  {% if servers %}
+  <div class="server-chips">
+    {% for s in servers %}<span class="chip">🌍 {{ s.name }}</span>{% endfor %}
+  </div>
+  {% endif %}
+  {% if tariffs %}
+  <div class="grid cards">
+    {% for t in tariffs %}
+    <div class="price-card">
+      {% if loop.index == 1 %}<span class="tag hot">Хит</span>{% endif %}
+      <h3>{{ t.name }}</h3>
+      {% if t.group_name %}<div class="muted small">{{ t.group_name }}</div>{% endif %}
+      <div class="price">{{ "%.0f"|format(t.price_rub) }} ₽</div>
+      <div class="per">{{ t.duration_days }} дней · {{ (t.price_rub / t.duration_days * 30)|round(0)|int }} ₽/мес</div>
+      <ul class="features">
+        <li>⚡ Безлимитная скорость</li>
+        <li>📡 Трафик: {% if t.traffic_limit_gb %}{{ t.traffic_limit_gb }} ГБ{% else %}безлимит{% endif %}</li>
+        <li>💻 Устройств: {% if t.max_ips %}{{ t.max_ips }}{% else %}∞{% endif %}</li>
+      </ul>
+      <a class="btn btn-primary card-btn" href="/checkout/{{ t.id }}">Купить</a>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="empty">Тарифы ещё не настроены.</div>
+  {% endif %}
+</div></section>
+{% endblock %}
