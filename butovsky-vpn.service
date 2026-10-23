@@ -1,14 +1,20 @@
 [Unit]
-Description=Butovsky VPN Bot
-After=network.target
+Description=ButovskyVPN website and Telegram bot
+Wants=network-online.target
+After=network-online.target x-ui.service nginx.service
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/root/ButovskyVPN
-ExecStart=/root/ButovskyVPN/venv/bin/python main.py
+ExecStart=/root/ButovskyVPN/venv/bin/python /root/ButovskyVPN/run_all.py
+Environment=PYTHONUNBUFFERED=1
+Environment=WEB_HOST=127.0.0.1
+Environment=WEB_PORT=8080
+UMask=0077
 Restart=always
 RestartSec=5
+TimeoutStopSec=30
 
 [Install]
 WantedBy=multi-user.target
