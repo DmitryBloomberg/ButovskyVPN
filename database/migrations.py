@@ -61,7 +61,7 @@ if len(_CORE_PAGE_KEYS_V105) != 80:
 INITIAL_VERSION = 97
 
 # Current schema version; post-v97 changes stay outside the compressed baseline.
-LATEST_VERSION = 113
+LATEST_VERSION = 114
 
 
 DEFAULT_BROADCAST_STYLE_PROFILE = {
@@ -3761,6 +3761,13 @@ def migration_113(conn: sqlite3.Connection) -> None:
     ))
 
 
+def migration_114(conn: sqlite3.Connection) -> None:
+    """Add email accounts and safe Telegram-link sessions for the storefront."""
+    from .db_web import create_web_support_tables
+
+    create_web_support_tables(conn)
+
+
 MIGRATIONS = {
     98: migration_98,
     99: migration_99,
@@ -3778,6 +3785,7 @@ MIGRATIONS = {
     111: migration_111,
     112: migration_112,
     113: migration_113,
+    114: migration_114,
 }
 
 

@@ -227,6 +227,36 @@ def get_payment_provider_adapter(provider_id: str) -> PaymentProviderAdapter | N
     )
 
 
+def get_provider_minimum(adapter: PaymentProviderAdapter) -> int:
+    """Return the provider's minimum charge in its native minor units."""
+    minimums = {
+        'crypto': 1,
+        'cryptobot': 1,
+        'stars': 1,
+        'cards': 10000,
+        'yookassa_qr': 100,
+        'wata': 1000,
+        'platega': 1000,
+        'cardlink': 1000,
+    }
+    minimum = minimums.get(adapter.provider_id, 0)
+    if adapter.custom:
+        from bot.utils.payment_provider_registry import get_payment_provider
+
+        provider = get_payment_provider(adapter.provider_id)
+        minimum = int(provider.minimum_amount_minor or 0) if provider else 0
+    return minimum
+
+
+def provider_minimum_satisfied(
+    adapter: PaymentProviderAdapter,
+    quote: PaymentQuote,
+) -> bool:
+    """Check a provider charge against its configured minimum."""
+    amount = int(quote.raw.get('final_amount') or 0)
+    return amount == 0 or amount >= get_provider_minimum(adapter)
+
+
 async def create_provider_invoice(
     intent: PaymentIntent,
     quote: PaymentQuote,
@@ -643,7 +673,9 @@ __all__ = [
     'ProviderInvoice',
     'check_provider_invoice',
     'create_provider_invoice',
+    'get_provider_minimum',
     'get_payment_provider_adapter',
     'has_available_payment_method',
     'list_payment_provider_adapters',
+    'provider_minimum_satisfied',
 ]

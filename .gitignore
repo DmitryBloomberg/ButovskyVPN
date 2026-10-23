@@ -32,3 +32,5 @@ env/
 env*/
 venv*/
 .env
+run_all.pid
+*.zip

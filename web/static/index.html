@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101114">
+  <meta name="description" content="Покупка и управление VPN-ключами ButovskyVPN">
+  <title>Butovsky VPN — личный кабинет</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/app.js"></script>
+</head>
+<body data-theme="dark">
+  <div class="page-shell">
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="Butovsky VPN — главная">
+        <span class="brand-mark"><span></span><span></span><span></span></span>
+        <span class="brand-copy"><strong>BUTOVSKY</strong><small>PRIVATE NETWORK</small></span>
+      </a>
+      <div class="top-actions">
+        <div class="theme-switch" role="group" aria-label="Цветовая тема">
+          <button type="button" data-theme-choice="dark" aria-label="Тёмная тема" title="Тёмная">◐</button>
+          <button type="button" data-theme-choice="black" aria-label="Чёрная тема" title="Чёрная">◑</button>
+          <button type="button" data-theme-choice="light" aria-label="Светлая тема" title="Светлая">☼</button>
+        </div>
+        <button id="logoutButton" class="button button-quiet hidden" type="button">Выйти</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="status-dot"></span> VPN-доступ без лишних шагов</div>
+          <h1>Ваш интернет.<br><span>Ваши правила.</span></h1>
+          <p class="hero-lead">Выберите тариф, оплатите удобным способом и управляйте ключами в одном личном кабинете.</p>
+          <div class="hero-points">
+            <span><i>01</i> Подключение за пару минут</span>
+            <span><i>02</i> Тарифы и оплаты из общей базы</span>
+          </div>
+        </div>
+
+        <aside id="authCard" class="auth-card">
+          <div class="auth-heading">
+            <span class="auth-kicker">ЛИЧНЫЙ КАБИНЕТ</span>
+            <h2 id="authTitle">С возвращением</h2>
+            <p id="authSubtitle">Войдите, чтобы купить тариф или открыть свои ключи.</p>
+          </div>
+          <div id="authTabs" class="auth-tabs">
+            <button type="button" class="auth-tab active" data-auth-mode="login">Войти</button>
+            <button type="button" class="auth-tab" data-auth-mode="register">Создать аккаунт</button>
+          </div>
+          <form id="authForm" class="auth-form">
+            <label for="emailInput">Электронная почта</label>
+            <input id="emailInput" name="email" type="email" autocomplete="email" placeholder="name@example.com" maxlength="254" required>
+            <label for="passwordInput">Пароль</label>
+            <input id="passwordInput" name="password" type="password" autocomplete="current-password" placeholder="Не менее 10 символов" minlength="10" maxlength="128" required>
+            <p id="passwordHint" class="field-hint hidden">Используйте не менее 10 символов.</p>
+            <button id="authSubmit" class="button button-primary button-wide" type="submit">Войти в аккаунт <span>↗</span></button>
+            <p class="privacy-note">Пароль хранится в защищённом виде. Почта используется для входа.</p>
+          </form>
+          <div id="accountSummary" class="account-summary hidden">
+            <div class="account-avatar">B</div>
+            <div class="account-main">
+              <strong id="accountEmail"></strong>
+              <span id="telegramStatus" class="account-status"></span>
+            </div>
+          <button id="telegramLinkButton" class="button button-outline button-wide" type="button">Привязать Telegram для оплаты в боте</button>
+            <a id="telegramLink" class="telegram-link hidden" href="#" target="_blank" rel="noopener noreferrer">Открыть Telegram для привязки →</a>
+            <p class="privacy-note">Привязка нужна только для счёта Telegram Stars и не меняет меню бота.</p>
+          </div>
+          <div id="authMessage" class="inline-message hidden" role="status"></div>
+        </aside>
+      </section>
+
+      <section class="catalog-section">
+        <div class="section-heading">
+          <div>
+            <span class="section-kicker">ВЫБЕРИТЕ СВОЙ РИТМ</span>
+            <h2>Тарифы</h2>
+          </div>
+          <p>Актуальные цены и доступность тарифов загружаются из панели бота.</p>
+        </div>
+        <div id="catalog" class="tariff-grid" aria-live="polite">
+          <div class="loading-card"><span class="loader"></span> Загружаем тарифы…</div>
+        </div>
+        <div id="catalogEmpty" class="empty-state hidden">Сейчас нет доступных тарифов. Проверьте настройки в админ-панели бота.</div>
+      </section>
+
+      <section id="accountArea" class="account-area hidden">
+        <div class="section-heading account-section-heading">
+          <div>
+            <span class="section-kicker">ВАШИ ДАННЫЕ</span>
+            <h2>Ключи и заказы</h2>
+          </div>
+          <button id="refreshButton" class="button button-outline" type="button">Обновить ↻</button>
+        </div>
+        <div class="dashboard-grid">
+          <section class="dashboard-card">
+            <div class="card-heading"><div><span class="section-kicker">ПОДКЛЮЧЕНИЯ</span><h3>Мои ключи</h3></div><span class="card-icon">⌁</span></div>
+            <div id="keysList" class="data-list"><div class="muted">Войдите, чтобы увидеть ключи.</div></div>
+          </section>
+          <section class="dashboard-card">
+            <div class="card-heading"><div><span class="section-kicker">ПОКУПКИ</span><h3>История заказов</h3></div><span class="card-icon">↗</span></div>
+            <div id="ordersList" class="data-list"><div class="muted">Здесь появятся ваши заказы.</div></div>
+          </section>
+        </div>
+      </section>
+
+      <footer class="footer">
+        <span>© BUTOVSKY VPN</span>
+        <span>Единые тарифы и платежи сайта и Telegram-бота</span>
+      </footer>
+    </main>
+  </div>
+
+  <dialog id="checkoutDialog" class="checkout-dialog">
+    <div class="dialog-top">
+      <div><span class="section-kicker">ОФОРМЛЕНИЕ</span><h2 id="dialogTitle">Оплата тарифа</h2></div>
+      <button id="closeDialog" class="close-button" type="button" aria-label="Закрыть">×</button>
+    </div>
+    <p id="dialogDescription" class="dialog-description"></p>
+    <div id="providerChoices" class="provider-list"></div>
+    <div id="paymentResult" class="payment-result hidden"></div>
+    <p class="dialog-footnote">Платёж подтверждается через платёжный модуль бота. Ключ появится в личном кабинете после выдачи.</p>
+  </dialog>
+  <div id="toast" class="toast" role="status"></div>
+</body>
+</html>

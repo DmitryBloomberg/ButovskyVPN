@@ -864,29 +864,15 @@ def _has_any_payment_option(intent, *, telegram_id: int) -> bool:
 
 
 def _provider_minimum(adapter) -> int:
-    minimums = {
-        'crypto': 1,
-        'cryptobot': 1,
-        'stars': 1,
-        'cards': 10000,
-        'yookassa_qr': 100,
-        'wata': 1000,
-        'platega': 1000,
-        'cardlink': 1000,
-    }
-    minimum = minimums.get(adapter.provider_id, 0)
-    if adapter.custom:
-        from bot.utils.payment_provider_registry import get_payment_provider
+    from bot.services.payment_provider_adapters import get_provider_minimum
 
-        provider = get_payment_provider(adapter.provider_id)
-        minimum = int(provider.minimum_amount_minor or 0) if provider else 0
-    return minimum
+    return get_provider_minimum(adapter)
 
 
 def _provider_minimum_satisfied(adapter, quote) -> bool:
-    amount = int(quote.raw.get('final_amount') or 0)
-    minimum = _provider_minimum(adapter)
-    return amount == 0 or amount >= minimum
+    from bot.services.payment_provider_adapters import provider_minimum_satisfied
+
+    return provider_minimum_satisfied(adapter, quote)
 
 
 def _format_provider_minimum(intent, quote, minimum: int, adapter) -> str:

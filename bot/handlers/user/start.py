@@ -104,6 +104,33 @@ async def cmd_start(message: Message, state: FSMContext, command: CommandObject)
         return
 
     args = command.args
+    if args and args.startswith('web_'):
+        from database.db_web import consume_web_link_token
+
+        result = consume_web_link_token(args[4:], user_id)
+        await state.clear()
+        messages = {
+            'linked': (
+                '✅ Telegram-аккаунт привязан к вашему аккаунту на сайте. '
+                'Теперь на этот аккаунт можно отправлять счета Telegram Stars.'
+            ),
+            'telegram_already_linked': (
+                'Этот Telegram-аккаунт уже привязан к другому аккаунту сайта. '
+                'Войдите в него или обратитесь к администратору.'
+            ),
+            'invalid_or_expired': (
+                'Ссылка для привязки недействительна или устарела. '
+                'Создайте новую ссылку в личном кабинете сайта.'
+            ),
+        }
+        await message.answer(
+            messages.get(
+                result,
+                'Не удалось привязать аккаунт. Создайте новую ссылку на сайте.',
+            )
+        )
+        return
+
     if args:
         try:
             from bot.handlers.user.payments.base import handle_payment_deeplink

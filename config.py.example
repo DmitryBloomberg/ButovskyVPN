@@ -1,8 +1,18 @@
 import os
 
 # Telegram Bot API Token
-# Получите у @BotFather
-BOT_TOKEN = "ВАШ_ТОКЕН_БОТА"
+# Получите у @BotFather. Для локального теста сайта токен можно не заполнять.
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН_БОТА")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "")  # например, ButovskyVPNBot
+
+# Web storefront. На Debian сайт обычно слушает localhost за Nginx.
+WEB_HOST = os.environ.get("WEB_HOST", "127.0.0.1")
+WEB_PORT = int(os.environ.get("WEB_PORT", "8080"))
+WEB_BASE_URL = os.environ.get("WEB_BASE_URL", "http://127.0.0.1:8080")
+WEB_COOKIE_SECURE = os.environ.get(
+    "WEB_COOKIE_SECURE",
+    "true" if WEB_BASE_URL.startswith("https://") else "false",
+).lower() in {"1", "true", "yes", "on"}
 
 # Список Telegram ID администраторов бота
 ADMIN_IDS = [
