@@ -223,7 +223,7 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$VENV_DIR/bin/python main.py
+ExecStart=$VENV_DIR/bin/python $INSTALL_DIR/run_all.py
 Restart=always
 RestartSec=5
 
