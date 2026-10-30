@@ -112,11 +112,14 @@ def add_server_step_kb(
 
 
 def add_server_auth_method_kb() -> InlineKeyboardMarkup:
-    """Authentication method selector shown before server fields."""
+    """Panel and authentication selector shown before server fields."""
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text='🔑 По API-ключу', callback_data='admin_server_auth_api_token'),
-        InlineKeyboardButton(text='👤 Логин и пароль', callback_data='admin_server_auth_login_password'),
+        InlineKeyboardButton(text='🌊 Remnawave', callback_data='admin_server_auth_remnawave'),
+    )
+    builder.row(
+        InlineKeyboardButton(text='🔑 3X-UI по API-ключу', callback_data='admin_server_auth_api_token'),
+        InlineKeyboardButton(text='👤 3X-UI логин и пароль', callback_data='admin_server_auth_login_password'),
     )
     builder.row(back_button('admin_servers'), home_button())
     return builder.as_markup()

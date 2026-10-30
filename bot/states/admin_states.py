@@ -22,11 +22,13 @@ class AdminStates(StatesGroup):
     server_view = State()            # View a specific server
     
     # ========== Adding a server (step-by-step dialogue) ==========
+    add_server_panel_type = State()  # Panel type selection (3x-ui / Remnawave)
     add_server_auth_method = State() # Authentication method selection
     add_server_name = State()        # Step 1: Title
     add_server_url = State()         # Step 2: Panel URL
     add_server_inbound_group = State()  # Step 3: Optional virtual inbound group
-    add_server_api_token = State()   # Step 4: 3X-UI API token
+    add_server_subscription_domain = State()  # Remnawave public subscription domain
+    add_server_api_token = State()   # Step 4: panel API token
     add_server_login = State()       # Step 4: Login
     add_server_password = State()    # Step 5: Password
     add_server_confirm = State()     # Confirmation after verification
@@ -187,6 +189,23 @@ SERVER_API_TOKEN_PARAM = {
     "error": "API-ключ должен содержать минимум 8 символов"
 }
 
+REMNAWAVE_API_TOKEN_PARAM = {
+    "key": "api_token",
+    "label": "API-токен Remnawave",
+    "hint": "Remnawave → настройки → API Tokens → создайте токен с правами Cabinet API и отправьте его сюда",
+    "validate": lambda x: len(x.strip()) >= 8,
+    "error": "API-токен должен содержать минимум 8 символов",
+}
+
+REMNAWAVE_SUBSCRIPTION_DOMAIN_PARAM = {
+    "key": "subscription_base_url",
+    "label": "Домен подписок",
+    "hint": "публичный домен страницы подписки (SUB_PUBLIC_DOMAIN), например https://sub.example.com. Отправьте «skip», если совпадает с адресом панели",
+    "validate": lambda x: x.strip().lower() == "skip" or len(x.strip()) >= 5,
+    "convert": lambda x: None if str(x).strip().lower() == "skip" else str(x).strip(),
+    "error": "Введите URL вида https://sub.example.com или «skip»",
+}
+
 SERVER_LOGIN_PARAMS = [
     {
         "key": "login",
@@ -209,6 +228,11 @@ SERVER_PARAMS = SERVER_COMMON_PARAMS + SERVER_LOGIN_PARAMS
 
 def get_server_params(auth_method: str = "login_password") -> list:
     """Returns server fields for the selected authentication method."""
+    if auth_method == "remnawave":
+        return SERVER_COMMON_PARAMS + [
+            REMNAWAVE_API_TOKEN_PARAM,
+            REMNAWAVE_SUBSCRIPTION_DOMAIN_PARAM,
+        ]
     if auth_method == "api_token":
         return SERVER_COMMON_PARAMS + [SERVER_API_TOKEN_PARAM]
     return SERVER_COMMON_PARAMS + SERVER_LOGIN_PARAMS

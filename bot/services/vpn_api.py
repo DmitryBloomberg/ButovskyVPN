@@ -27,12 +27,30 @@ from .panels.base import (
     VPNAPIError,
 )
 from .panels.xui import XUIClient
+from .panels.remnawave import RemnawaveClient
 
 
 logger = logging.getLogger(__name__)
 
 _clients: Dict[int, BaseVPNClient] = {}
 _ensure_locks: Dict[int, asyncio.Lock] = {}
+
+
+def _panel_type_of(server: Dict[str, Any]) -> str:
+    """Return the normalized panel type stored for a server row."""
+    return str(server.get("panel_type") or "3x-ui").strip().lower()
+
+
+def create_panel_client(server: Dict[str, Any]) -> BaseVPNClient:
+    """Instantiate the panel adapter matching the server's panel type.
+
+    ``panel_type == "remnawave"`` routes key issuing and synchronization
+    through the Remnawave REST API; anything else keeps the legacy 3X-UI
+    behavior so existing servers continue to work unchanged.
+    """
+    if _panel_type_of(server) == "remnawave":
+        return RemnawaveClient(server)
+    return XUIClient(server)
 
 
 @asynccontextmanager
@@ -76,7 +94,7 @@ async def provision_client_on_server(
             raise PanelRequestError(
                 PanelErrorKind.UNSUPPORTED_VERSION,
                 endpoint="/panel/api/clients/add",
-                detail="client HWID limits require 3X-UI 3.7.0+",
+                detail="client HWID limits are not supported by this panel",
             )
     result = panel_client.provision_client(
         email=email,
@@ -101,7 +119,7 @@ def get_client_from_server_data(server: Dict[str, Any]) -> BaseVPNClient:
     """Return the cached client for a saved server."""
     server_id = int(server["id"])
     if server_id not in _clients:
-        _clients[server_id] = XUIClient(server)
+        _clients[server_id] = create_panel_client(server)
     return _clients[server_id]
 
 
@@ -125,7 +143,7 @@ async def close_all_clients() -> None:
             logger.exception("Could not close panel client server_id=%s", server_id)
 
 
-async def get_client(server_id: int) -> XUIClient:
+async def get_client(server_id: int) -> BaseVPNClient:
     from database.requests import get_server_by_id
 
     normalized_id = int(server_id)
@@ -211,7 +229,7 @@ async def get_key_devices_for_user(
         raise PanelRequestError(
             PanelErrorKind.UNSUPPORTED_VERSION,
             endpoint="/panel/api/clients/hwids/:email",
-            detail="client HWIDs require 3X-UI 3.7.0+",
+            detail="client HWIDs are not supported by this panel",
         )
     devices = panel_client.get_client_devices(panel_email)
     devices = await devices if inspect.isawaitable(devices) else devices
@@ -258,7 +276,7 @@ async def delete_key_device_for_user(
         raise PanelRequestError(
             PanelErrorKind.UNSUPPORTED_VERSION,
             endpoint="/panel/api/clients/hwids/:email/:id",
-            detail="client HWIDs require 3X-UI 3.7.0+",
+            detail="client HWIDs are not supported by this panel",
         )
     result = panel_client.delete_client_device(panel_email, normalized_device_id)
     result = await result if inspect.isawaitable(result) else result
@@ -303,7 +321,7 @@ async def test_server_connection(server_data: Dict[str, Any]) -> Dict[str, Any]:
         if reusable_token:
             server_data["api_token"] = reusable_token
             server_data["_shared_panel_auth"] = True
-    client = XUIClient(server_data)
+    client = create_panel_client(server_data)
     try:
         await client.validate_connection()
         stats = await client.get_stats()
@@ -991,6 +1009,7 @@ __all__ = [
     "get_client",
     "get_client_external_links",
     "get_key_devices_for_user",
+    "create_panel_client",
     "get_client_from_server_data",
     "get_client_inbound_descriptors",
     "get_key_expiry_time_ms",
