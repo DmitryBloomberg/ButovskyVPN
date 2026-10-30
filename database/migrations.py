@@ -61,7 +61,7 @@ if len(_CORE_PAGE_KEYS_V105) != 80:
 INITIAL_VERSION = 97
 
 # Current schema version; post-v97 changes stay outside the compressed baseline.
-LATEST_VERSION = 113
+LATEST_VERSION = 114
 
 
 DEFAULT_BROADCAST_STYLE_PROFILE = {
@@ -478,7 +478,9 @@ CREATE TABLE servers (
             api_token TEXT,
             panel_version TEXT,
             panel_api_profile TEXT,
-            panel_checked_at TEXT
+            panel_checked_at TEXT,
+            panel_type TEXT DEFAULT '3x-ui',
+            subscription_base_url TEXT
         );
 
 CREATE TABLE settings (
@@ -3761,6 +3763,22 @@ def migration_113(conn: sqlite3.Connection) -> None:
     ))
 
 
+def migration_114(conn: sqlite3.Connection) -> None:
+    """Support Remnawave panels for key issuing and synchronization.
+
+    Adds ``panel_type`` ("3x-ui" | "remnawave") so the facade can pick the
+    right adapter, and ``subscription_base_url`` holding the public
+    subscription-page domain (SUB_PUBLIC_DOMAIN) used to build key links.
+    """
+    columns = {row[1] for row in conn.execute('PRAGMA table_info(servers)')}
+    if 'panel_type' not in columns:
+        conn.execute(
+            "ALTER TABLE servers ADD COLUMN panel_type TEXT DEFAULT '3x-ui'"
+        )
+    if 'subscription_base_url' not in columns:
+        conn.execute('ALTER TABLE servers ADD COLUMN subscription_base_url TEXT')
+
+
 MIGRATIONS = {
     98: migration_98,
     99: migration_99,
@@ -3778,6 +3796,7 @@ MIGRATIONS = {
     111: migration_111,
     112: migration_112,
     113: migration_113,
+    114: migration_114,
 }
 
 

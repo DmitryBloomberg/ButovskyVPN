@@ -243,6 +243,7 @@ async def show_server_view(callback: CallbackQuery, state: FSMContext):
 
 AUTH_API_TOKEN = "api_token"
 AUTH_LOGIN_PASSWORD = "login_password"
+AUTH_REMNAWAVE = "remnawave"
 
 ADD_STATES = {
     AUTH_API_TOKEN: [
@@ -258,11 +259,20 @@ ADD_STATES = {
         AdminStates.add_server_login,
         AdminStates.add_server_password,
     ],
+    AUTH_REMNAWAVE: [
+        AdminStates.add_server_name,
+        AdminStates.add_server_url,
+        AdminStates.add_server_inbound_group,
+        AdminStates.add_server_api_token,
+        AdminStates.add_server_subscription_domain,
+    ],
 }
 
 
 def get_server_auth_method(server: dict) -> str:
-    """Derives the persisted authentication method without a schema flag."""
+    """Derives the persisted authentication method for edit wizards."""
+    if str(server.get('panel_type') or '').strip().lower() == 'remnawave':
+        return AUTH_REMNAWAVE
     has_credentials = bool(
         str(server.get('login') or '').strip()
         and str(server.get('password') or '').strip()

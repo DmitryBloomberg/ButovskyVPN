@@ -25,7 +25,8 @@ __all__ = [
 
 SERVER_SELECT_FIELDS = """
     id, name, host, port, web_base_path, login, password, is_active, protocol,
-    api_token, panel_version, panel_checked_at, inbound_group_id
+    api_token, panel_version, panel_checked_at, inbound_group_id,
+    panel_type, subscription_base_url
 """
 
 def get_all_servers() -> List[Dict[str, Any]]:
@@ -90,6 +91,8 @@ def add_server(
     api_token: Optional[str] = None,
     panel_version: Optional[str] = None,
     inbound_group_id: Optional[int] = None,
+    panel_type: str = "3x-ui",
+    subscription_base_url: Optional[str] = None,
 ) -> int:
     """
     Adds a new VPN server.
@@ -119,12 +122,13 @@ def add_server(
             INSERT INTO servers (
                 name, host, port, web_base_path, login, password, is_active,
                 protocol, api_token, panel_version, panel_checked_at,
-                inbound_group_id
+                inbound_group_id, panel_type, subscription_base_url
             )
-            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
         """, (
             name, host, port, web_base_path, login, password, protocol,
             api_token, panel_version, panel_checked_at, inbound_group_id,
+            panel_type or "3x-ui", subscription_base_url,
         ))
         server_id = cursor.lastrowid
         
@@ -152,6 +156,7 @@ def update_server(server_id: int, **fields) -> bool:
         'name', 'host', 'port', 'web_base_path', 'login', 'password',
         'is_active', 'protocol', 'api_token', 'panel_version',
         'panel_checked_at', 'inbound_group_id',
+        'panel_type', 'subscription_base_url',
     }
     fields = {k: v for k, v in fields.items() if k in allowed_fields}
     
