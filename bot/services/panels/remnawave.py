@@ -260,11 +260,8 @@ class RemnawaveClient(BaseVPNClient):
 
     async def validate_connection(self) -> bool:
         payload = await self._request("GET", f"{API_PREFIX}/system/metadata")
-        version = str(
-            (_unwrap(payload) or {}).get("panelVersion")
-            if isinstance(_unwrap(payload), dict)
-            else ""
-        )
+        response = self._unwrap(payload)
+        version = str(response.get("panelVersion") or "") if isinstance(response, dict) else ""
         if version:
             self.server["panel_version"] = version
             self.panel_version = version
@@ -742,10 +739,26 @@ class RemnawaveClient(BaseVPNClient):
         short_uuid = str(sub_id or "").strip()
         if not short_uuid:
             return None
+        # Prefer the live configuration stored in the panel itself.
+        try:
+            payload = await self._request(
+                "GET", f"{API_PREFIX}/subscription-page-link/{short_uuid}", retry=False
+            )
+            response = self._unwrap(payload)
+            if isinstance(response, dict):
+                link = str(response.get("pageLink") or response.get("url") or "").strip()
+                if link.startswith(("http://", "https://")):
+                    return link
+        except (PanelRequestError, PanelRejectedError):
+            pass
         base = self.subscription_base_url
         if not base:
             base = f"{self.protocol}://{self.host}"
         return f"{base.rstrip('/')}/profile/{short_uuid}"
+
+    async def refresh_capabilities(self) -> bool:
+        """Remnawave capabilities are static; validate the token instead."""
+        return await self.validate_connection()
 
     # ------------------------------------------------------------------
     # Unsupported on Remnawave
@@ -776,6 +789,113 @@ class RemnawaveClient(BaseVPNClient):
                     self.server_id,
                     elapsed_ms,
                 )
+
+    # ------------------------------------------------------------------
+    # Bulk reconciliation primitives (used by panel_sync bulk prelude).
+    # Remnawave has no per-inbound membership: a squad is the analogue of
+    # an inbound group, so attach/detach operate on the resolved squad and
+    # degrade gracefully when there is nothing to change.
+    # ------------------------------------------------------------------
+
+    async def bulk_attach_clients(
+        self, emails: Iterable[str], inbound_ids: Iterable[int]
+    ) -> List[str]:
+        """Add users to the resolved internal squad; returns confirmed emails."""
+        target_squad_uuid = await self.resolve_squad_uuid(self.inbound_group_id)
+        if not target_squad_uuid:
+            # No squad restriction configured: membership is already complete.
+            return [email for email in emails]
+        confirmed: List[str] = []
+        for email in emails:
+            user = await self._get_user_by_username(email)
+            if not user:
+                continue
+            squads = list(user.get("internalSquads") or [])
+            uuids = {
+                str(item.get("uuid") or item.get("squadUuid") or "")
+                for item in squads
+                if isinstance(item, dict)
+            }
+            if target_squad_uuid in uuids:
+                confirmed.append(email)
+                continue
+            squads.append({"squadUuid": target_squad_uuid})
+            await self._request(
+                "PATCH",
+                f"{API_PREFIX}/users/{user.get('uuid')}",
+                json_body={
+                    "userType": "regular",
+                    "internalSquads": squads,
+                    "rehashShortUuid": False,
+                },
+            )
+            confirmed.append(email)
+        return confirmed
+
+    async def bulk_detach_clients(
+        self, emails: Iterable[str], inbound_ids: Iterable[int]
+    ) -> List[str]:
+        """Remove users from the resolved internal squad."""
+        target_squad_uuid = await self.resolve_squad_uuid(self.inbound_group_id)
+        if not target_squad_uuid:
+            return [email for email in emails]
+        confirmed: List[str] = []
+        for email in emails:
+            user = await self._get_user_by_username(email)
+            if not user:
+                continue
+            squads = [
+                item
+                for item in (user.get("internalSquads") or [])
+                if isinstance(item, dict)
+                and str(item.get("uuid") or item.get("squadUuid") or "")
+                != target_squad_uuid
+            ]
+            await self._request(
+                "PATCH",
+                f"{API_PREFIX}/users/{user.get('uuid')}",
+                json_body={
+                    "userType": "regular",
+                    "internalSquads": squads,
+                    "rehashShortUuid": False,
+                },
+            )
+            confirmed.append(email)
+        return confirmed
+
+    async def bulk_delete_clients(self, emails: Iterable[str]) -> int:
+        deleted = 0
+        for email in emails:
+            try:
+                if await self.delete_client(email):
+                    deleted += 1
+            except VPNAPIError as exc:
+                logger.warning("remnawave bulk delete failed email=%s: %s", email, exc)
+        return deleted
+
+    async def bulk_set_clients_enabled(
+        self, emails: Iterable[str], enable: bool
+    ) -> int:
+        changed = 0
+        action = "enable" if enable else "disable"
+        for email in emails:
+            user = await self._get_user_by_username(email)
+            if not user:
+                continue
+            if self._user_status_enabled(user) == bool(enable):
+                changed += 1
+                continue
+            try:
+                await self._request(
+                    "POST",
+                    f"{API_PREFIX}/users/{user.get('uuid')}/actions/{action}",
+                )
+                changed += 1
+            except VPNAPIError as exc:
+                logger.warning(
+                    "remnawave bulk %s failed email=%s: %s", action, email, exc
+                )
+        return changed
 
     async def hydrate_client_state(
         self, state: PanelClientState

@@ -412,13 +412,16 @@ async def render_add_auth_method(
         message,
         state,
         "🔐 <b>Подключение сервера</b>\n\n"
-        "🔑 <b>API-ключ</b> — рекомендуемый вариант для 3X-UI 3.3.0 и новее. "
+        "🌊 <b>Remnawave</b> — выдача и синхронизация ключей через REST API "
+        "панели Remnawave (статический Bearer-токен из раздела «API Tokens», "
+        "пользователи вместо клиентов, squads вместо групп inbound).\n\n"
+        "🔑 <b>3X-UI по API-ключу</b> — рекомендуемый вариант для 3X-UI 3.3.0 и новее. "
         "Бот работает без входа в аккаунт панели, поэтому в панели можно оставить "
         "включённой двухфакторную аутентификацию.\n\n"
-        "👤 <b>Логин и пароль</b> — бот входит в 3X-UI только для получения и "
+        "👤 <b>3X-UI логин и пароль</b> — бот входит в 3X-UI только для получения и "
         "восстановления собственного API-ключа. Обычные операции всё равно идут через Bearer API. "
         "При включённой двухфакторной аутентификации этот способ не работает.\n\n"
-        "Выберите способ подключения:",
+        "Выберите панель и способ подключения:",
         reply_markup=add_server_auth_method_kb(),
     )
 
@@ -446,20 +449,37 @@ async def show_add_server_auth_method(callback: CallbackQuery, state: FSMContext
 
 @router.callback_query(
     AdminStates.add_server_auth_method,
-    F.data.in_({"admin_server_auth_api_token", "admin_server_auth_login_password"}),
+    F.data.in_({
+        "admin_server_auth_api_token",
+        "admin_server_auth_login_password",
+        "admin_server_auth_remnawave",
+    }),
 )
 async def select_server_auth_method(callback: CallbackQuery, state: FSMContext):
-    """Selects API-token or username/password authentication."""
+    """Selects the panel type and authentication branch for a new server."""
     if not is_admin(callback.from_user.id):
         await callback.answer("⛔ Доступ запрещён", show_alert=True)
         return
 
-    auth_method = (
-        AUTH_API_TOKEN
-        if callback.data == "admin_server_auth_api_token"
-        else AUTH_LOGIN_PASSWORD
-    )
-    server_data = {'login': '', 'password': ''} if auth_method == AUTH_API_TOKEN else {}
+    if callback.data == "admin_server_auth_remnawave":
+        auth_method = AUTH_REMNAWAVE
+        server_data = {
+            'login': '',
+            'password': '',
+            'panel_type': 'remnawave',
+            'subscription_base_url': None,
+        }
+    else:
+        auth_method = (
+            AUTH_API_TOKEN
+            if callback.data == "admin_server_auth_api_token"
+            else AUTH_LOGIN_PASSWORD
+        )
+        server_data = (
+            {'login': '', 'password': '', 'panel_type': '3x-ui'}
+            if auth_method == AUTH_API_TOKEN
+            else {'panel_type': '3x-ui'}
+        )
     await state.update_data(
         auth_method=auth_method,
         server_data=server_data,
@@ -747,6 +767,11 @@ async def add_server_password_handler(message: Message, state: FSMContext):
     await process_add_step(message, state)
 
 
+@router.message(AdminStates.add_server_subscription_domain)
+async def add_server_subscription_domain_handler(message: Message, state: FSMContext):
+    await process_add_step(message, state)
+
+
 @router.callback_query(F.data == "admin_server_add_test")
 async def add_server_retest(callback: CallbackQuery, state: FSMContext):
     """Recheck the connection."""
@@ -811,6 +836,8 @@ async def add_server_save(callback: CallbackQuery, state: FSMContext):
             inbound_group_id=server_data.get('inbound_group_id'),
             api_token=server_data.get('api_token'),
             panel_version=server_data.get('panel_version'),
+            panel_type=server_data.get('panel_type') or '3x-ui',
+            subscription_base_url=server_data.get('subscription_base_url'),
         )
         
         target = await render_admin_dialog(callback.message, state,
